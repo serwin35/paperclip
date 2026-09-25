@@ -1,0 +1,149 @@
+# Keeps the `pl` branch of this fork on top of upstream paperclipai/paperclip
+# and fills new UI strings in ui/locale-overlay/pl.json.
+#
+# Every run: merge upstream master into a fresh `pl-sync` branch cut from
+# `pl`, machine-translate new strings (only when ANTHROPIC_API_KEY is set),
+# validate, test and build the Polish UI, then open or refresh a PR into `pl`.
+# A merge conflict opens an issue instead; nothing is ever force-merged.
+# See ui/locale-overlay/README.md.
+name: pl-sync
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max_strings:
+        description: Maximum number of strings to machine-translate in this run
+        default: "300"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pl-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Never run in the upstream repository itself.
+    if: github.repository != 'paperclipai/paperclip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BASE_BRANCH: pl
+      SYNC_BRANCH: pl-sync
+      HAS_TRANSLATOR_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: pl
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git remote add upstream https://github.com/paperclipai/paperclip.git
+          git fetch --no-tags upstream master
+          git switch -C "$SYNC_BRANCH"
+          if ! git merge --no-edit upstream/master; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            # shellcheck disable=SC2016 # backticks are Markdown, not substitutions
+            body=$(printf 'Merging `paperclipai/paperclip@master` into `%s` hit conflicts in:\n\n```\n%s\n```\n\nResolve locally with `git fetch upstream && git switch %s && git merge upstream/master`.\n\nRun: %s\n' \
+              "$BASE_BRANCH" "$conflicts" "$BASE_BRANCH" "$run_url")
+            gh label create pl-sync-conflict --color B60205 --force > /dev/null
+            existing=$(gh issue list --state open --label pl-sync-conflict --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "$body"
+            else
+              gh issue create --title "pl-sync: upstream merge conflict" --label pl-sync-conflict --body "$body"
+            fi
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate overlay (dictionary rules, module override drift)
+        id: validate
+        continue-on-error: true
+        run: node cli/node_modules/tsx/dist/cli.mjs ui/locale-overlay/validate.ts --locale pl
+
+      - name: Machine-translate new strings
+        if: env.HAS_TRANSLATOR_KEY == 'true'
+        working-directory: ui/locale-overlay/translator
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAX_STRINGS: ${{ inputs.max_strings || '300' }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm run translate -- --locale pl --max "$MAX_STRINGS"
+
+      - name: Test overlay
+        run: pnpm --filter @paperclipai/ui exec vitest run locale-overlay
+
+      - name: Build Polish UI
+        run: |
+          pnpm --filter @paperclipai/plugin-sdk build
+          PAPERCLIP_UI_LOCALE=pl pnpm --filter @paperclipai/ui build
+
+      - name: Coverage report
+        run: |
+          {
+            echo '### Polish overlay coverage'
+            echo '```'
+            node cli/node_modules/tsx/dist/cli.mjs ui/locale-overlay/scan.ts --locale pl --top 25
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit translations
+        run: |
+          git add ui/locale-overlay/pl.json
+          git diff --cached --quiet || git commit -m "i18n(pl): machine-translate new UI strings"
+
+      - name: Push branch and open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        run: |
+          git fetch --no-tags origin "$BASE_BRANCH"
+          if [ -z "$(git rev-list "origin/$BASE_BRANCH..HEAD")" ]; then
+            echo "Nothing new: $BASE_BRANCH already contains upstream and all translations."
+            exit 0
+          fi
+          # pl-sync is a bot-owned branch regenerated from pl on every run.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$SYNC_BRANCH"
+
+          drift_note=""
+          if [ "$VALIDATE_OUTCOME" != "success" ]; then
+            drift_note=$'\n> **Validation failed** — most likely a module override drifted from upstream. Check the "Validate overlay" step and re-port the override before merging.\n'
+          fi
+          # shellcheck disable=SC2016 # backticks are Markdown, not substitutions
+          body=$(printf 'Automatic sync of `%s` with `paperclipai/paperclip@master` plus machine translations.\n%s\n- Upstream commits: %s\n- Review the `ui/locale-overlay/pl.json` diff; wrong terms go into `GLOSSARY.md`.\n- Coverage: see the run summary.\n\nRun: %s\n' \
+            "$BASE_BRANCH" "$drift_note" "$(git rev-list --count "origin/$BASE_BRANCH..upstream/master")" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+
+          existing=$(gh pr list --head "$SYNC_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$body"
+          else
+            gh pr create --base "$BASE_BRANCH" --head "$SYNC_BRANCH" --title "pl-sync: upstream + Polish translations" --body "$body"
+          fi

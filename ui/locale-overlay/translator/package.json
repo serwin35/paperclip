@@ -1,0 +1,12 @@
+{
+  "name": "paperclip-locale-overlay-translator",
+  "private": true,
+  "type": "module",
+  "description": "Fills untranslated locale-overlay strings via the Claude API. Standalone on purpose: not a pnpm workspace member, so it never touches the upstream pnpm-lock.yaml.",
+  "scripts": {
+    "translate": "node ../../../cli/node_modules/tsx/dist/cli.mjs translate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.128.0"
+  }
+}

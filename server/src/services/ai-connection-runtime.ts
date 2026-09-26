@@ -17,6 +17,10 @@ import { managedProviderRouting } from "./ai-provider-routing.js";
 import { aiConnectionService } from "./ai-connections.js";
 import { subscriptionService } from "./subscriptions.js";
 import { refreshSubscriptionConnection } from "./subscription-refresh.js";
+import {
+  provisionManagedHomeKeychain,
+  releaseManagedHomeKeychain,
+} from "./managed-home-keychain.js";
 import { secretService } from "./secrets.js";
 import { decideCodexAuthMerge, withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import { WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -320,6 +324,7 @@ export async function prepareManagedAiRuntime(
     );
     const providerHome = path.join(home, "provider");
     await mkdir(providerHome, { mode: 0o700 });
+    await provisionManagedHomeKeychain(home);
     const env: Record<string, unknown> = {
       ...stripAiAuthBindings(input.config.env),
       ...Object.fromEntries(AI_AUTH_ENV_KEYS.map((key) => [key, ""])),
@@ -491,11 +496,17 @@ export async function prepareManagedAiRuntime(
         // exhausted lock retry or database failure. The caller can retry the
         // same cleanup; only a committed save or an intentional discard
         // (revoked grant, older/different identity) permits deletion.
-        if (home) await rm(home, { recursive: true, force: true });
+        if (home) {
+          await releaseManagedHomeKeychain(home);
+          await rm(home, { recursive: true, force: true });
+        }
       },
     };
   } catch (error) {
-    if (home) await rm(home, { recursive: true, force: true });
+    if (home) {
+      await releaseManagedHomeKeychain(home);
+      await rm(home, { recursive: true, force: true });
+    }
     throw error;
   }
 }

@@ -78,8 +78,14 @@ export function localeOverlay(options: LocaleOverlayOptions = {}): Plugin {
       return fs.readFileSync(overridePath, "utf8");
     },
 
+    // The overlay already localizes the UI, so browser translation is switched
+    // off: translators rewrite React-owned text nodes and the next re-render
+    // crashes with "insertBefore: the node ... is not a child of this node".
     transformIndexHtml(html) {
-      return html.replace(/<html\b([^>]*)\blang="[^"]*"/, `<html$1lang="${locale}"`);
+      return {
+        html: html.replace(/<html\b([^>]*)\blang="[^"]*"/, `<html$1lang="${locale}" translate="no"`),
+        tags: [{ tag: "meta", attrs: { name: "google", content: "notranslate" }, injectTo: "head-prepend" }],
+      };
     },
 
     transform(code, id) {

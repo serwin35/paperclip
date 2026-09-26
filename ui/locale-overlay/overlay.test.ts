@@ -263,6 +263,14 @@ describe("localeOverlay plugin", () => {
     }
   });
 
+  it("sets the page language and opts out of browser translation", () => {
+    const plugin = localeOverlay({ locale: "pl" });
+    const hook = plugin.transformIndexHtml as (html: string) => { html: string; tags: Array<{ tag: string; attrs: Record<string, string> }> };
+    const result = hook('<!doctype html><html lang="en" class="dark"><head></head><body></body></html>');
+    expect(result.html).toContain('<html lang="pl" translate="no" class="dark">');
+    expect(result.tags).toContainEqual(expect.objectContaining({ tag: "meta", attrs: { name: "google", content: "notranslate" } }));
+  });
+
   it("rejects malformed locale names instead of reading arbitrary files", () => {
     expect(() => localeOverlay({ locale: "../../etc/passwd" })).toThrow(/invalid locale/);
   });

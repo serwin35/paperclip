@@ -67,17 +67,28 @@ describe("managed home keychain", () => {
     expect((await stat(path.join(home, "Library", "Preferences"))).isDirectory()).toBe(true);
   });
 
-  it("never fails the run when a security command fails", async () => {
+  it("never fails the run when a security command fails, and logs the failed step", async () => {
     const home = await tempHome();
     const { calls, run } = recordingRunner("unlock-keychain");
+    const warnings: { details: { err: unknown; step: string }; message: string }[] = [];
 
-    await expect(provisionManagedHomeKeychain(home, { platform: "darwin", run })).resolves.toBe(false);
+    await expect(
+      provisionManagedHomeKeychain(home, {
+        platform: "darwin",
+        run,
+        warn: (details, message) => warnings.push({ details, message }),
+      }),
+    ).resolves.toBe(false);
     // It stops at the failed step and does not change the search list.
     expect(calls.map((call) => call.args[0])).toEqual([
       "create-keychain",
       "set-keychain-settings",
       "unlock-keychain",
     ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.details.step).toBe("unlock-keychain");
+    expect(warnings[0]!.details.err).toBeInstanceOf(Error);
+    expect(warnings[0]!.message).toContain("keychain setup failed");
 
     const release = recordingRunner("delete-keychain");
     await expect(
@@ -99,14 +110,22 @@ describe("managed home keychain", () => {
   it.runIf(process.platform === "darwin")(
     "on macOS, gives the managed HOME a writable keychain without touching the operator's",
     async () => {
-      const operatorDefault = (await execFileAsync("/usr/bin/security", ["default-keychain"])).stdout;
+      const operatorKeychains = async () => ({
+        defaultKeychain: (await execFileAsync("/usr/bin/security", ["default-keychain"])).stdout,
+        searchList: (await execFileAsync("/usr/bin/security", ["list-keychains", "-d", "user"])).stdout,
+      });
+      const before = await operatorKeychains();
       const home = await tempHome();
       const env = { ...process.env, HOME: home };
 
       await expect(provisionManagedHomeKeychain(home)).resolves.toBe(true);
       try {
-        const { stdout } = await execFileAsync("/usr/bin/security", ["default-keychain"], { env });
-        expect(stdout).toContain(managedHomeKeychainPath(home));
+        const managedDefault = await execFileAsync("/usr/bin/security", ["default-keychain"], { env });
+        expect(managedDefault.stdout).toContain(managedHomeKeychainPath(home));
+        const managedSearchList = await execFileAsync("/usr/bin/security", ["list-keychains", "-d", "user"], { env });
+        expect(managedSearchList.stdout).toContain(managedHomeKeychainPath(home));
+        // The operator's settings stay the same while the run is active.
+        expect(await operatorKeychains()).toEqual(before);
         // A keychain write under the managed HOME succeeds instead of raising
         // the "Keychain Not Found" dialog.
         await execFileAsync(
@@ -118,7 +137,8 @@ describe("managed home keychain", () => {
         await releaseManagedHomeKeychain(home);
       }
 
-      expect((await execFileAsync("/usr/bin/security", ["default-keychain"])).stdout).toBe(operatorDefault);
+      // Both the default keychain and the search list are unchanged afterwards.
+      expect(await operatorKeychains()).toEqual(before);
     },
   );
 });

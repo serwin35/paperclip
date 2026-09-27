@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { logger } from "../middleware/logger.js";
 
 /**
  * macOS finds the user's keychain through $HOME (the keychain search list and
@@ -33,10 +34,19 @@ const runSecurity: SecurityCommandRunner = async (args, env) => {
   await execFileAsync(SECURITY_BIN, args, { env, timeout: SECURITY_TIMEOUT_MS });
 };
 
+export type KeychainSetupFailureLogger = (
+  details: { err: unknown; step: string },
+  message: string,
+) => void;
+
 type KeychainOptions = {
   platform?: NodeJS.Platform;
   run?: SecurityCommandRunner;
+  warn?: KeychainSetupFailureLogger;
 };
+
+const warnKeychainSetupFailure: KeychainSetupFailureLogger = (details, message) =>
+  logger.warn(details, message);
 
 export function managedHomeKeychainPath(home: string): string {
   return path.join(home, "Library", "Keychains", MANAGED_HOME_KEYCHAIN_NAME);
@@ -58,22 +68,33 @@ export async function provisionManagedHomeKeychain(
   // Only HOME changes. The keychain has no password, so no secret goes on
   // a command line.
   const env = { ...process.env, HOME: home };
+  let step = "mkdir";
   try {
     await mkdir(path.dirname(keychain), { recursive: true, mode: 0o700 });
     await mkdir(path.join(home, "Library", "Preferences"), {
       recursive: true,
       mode: 0o700,
     });
-    await run(["create-keychain", "-p", "", keychain], env);
-    // No auto-lock, so long runs do not hit a locked keychain.
-    await run(["set-keychain-settings", keychain], env);
-    await run(["unlock-keychain", "-p", "", keychain], env);
-    // With HOME=home, these write to home/Library/Preferences, not to the
-    // operator's preferences.
-    await run(["list-keychains", "-d", "user", "-s", keychain], env);
-    await run(["default-keychain", "-d", "user", "-s", keychain], env);
+    for (const args of [
+      ["create-keychain", "-p", "", keychain],
+      // No auto-lock, so long runs do not hit a locked keychain.
+      ["set-keychain-settings", keychain],
+      ["unlock-keychain", "-p", "", keychain],
+      // With HOME=home, these write to home/Library/Preferences, not to the
+      // operator's preferences.
+      ["list-keychains", "-d", "user", "-s", keychain],
+      ["default-keychain", "-d", "user", "-s", keychain],
+    ]) {
+      step = args[0]!;
+      await run(args, env);
+    }
     return true;
-  } catch {
+  } catch (err) {
+    // Still best effort, but say why the macOS dialog can come back.
+    (options.warn ?? warnKeychainSetupFailure)(
+      { err, step },
+      "Managed AI home keychain setup failed; keychain writes in this run may show a macOS dialog",
+    );
     return false;
   }
 }

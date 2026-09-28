@@ -36,6 +36,9 @@ jobs:
       BASE_BRANCH: pl
       SYNC_BRANCH: pl-sync
       HAS_TRANSLATOR_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      # In a fork, gh defaults to the parent repository: without this every
+      # PR, issue and label call would target paperclipai/paperclip.
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -62,13 +65,19 @@ jobs:
             # shellcheck disable=SC2016 # backticks are Markdown, not substitutions
             body=$(printf 'Merging `paperclipai/paperclip@master` into `%s` hit conflicts in:\n\n```\n%s\n```\n\nResolve locally with `git fetch upstream && git switch %s && git merge upstream/master`.\n\nRun: %s\n' \
               "$BASE_BRANCH" "$conflicts" "$BASE_BRANCH" "$run_url")
-            gh label create pl-sync-conflict --color B60205 --force > /dev/null
-            existing=$(gh issue list --state open --label pl-sync-conflict --json number --jq '.[0].number // empty')
-            if [ -n "$existing" ]; then
-              gh issue comment "$existing" --body "$body"
-            else
-              gh issue create --title "pl-sync: upstream merge conflict" --label pl-sync-conflict --body "$body"
+            # The failed run is the notification; the issue is a bonus that
+            # needs Issues enabled on the repository.
+            printf '%s\n' "$body" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$(gh api "repos/$GH_REPO" --jq .has_issues)" = "true" ]; then
+              gh label create pl-sync-conflict --color B60205 --force > /dev/null
+              existing=$(gh issue list --state open --label pl-sync-conflict --json number --jq '.[0].number // empty')
+              if [ -n "$existing" ]; then
+                gh issue comment "$existing" --body "$body"
+              else
+                gh issue create --title "pl-sync: upstream merge conflict" --label pl-sync-conflict --body "$body"
+              fi
             fi
+            echo "::error::Upstream merge conflict in: $(echo "$conflicts" | paste -sd, -)"
             exit 1
           fi
 

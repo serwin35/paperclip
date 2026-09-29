@@ -61,6 +61,8 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | job (plugin, scheduled) | zadanie w tle | |
 | checkout (git) | kopia robocza | |
 | harness | silnik | Claude Code / Codex / Cursor jako środowisko agenta |
+| Chief of staff | Chief of staff | domyślna nazwa pierwszego agenta; zostaje po angielsku jak w danych |
+| Previous / Next | Wstecz / Dalej | |
 
 ## Statusy zadań
 

@@ -52,6 +52,11 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | pipeline | potok | |
 | secret | sekret | |
 | plugin | wtyczka | |
+| watchdog | strażnik | agent pilnujący postępu pracy |
+| automation | automatyzacja | |
+| usage | zużycie | |
+| effort (reasoning) | poziom rozumowania | |
+| Loading… | Wczytywanie… | nie „Ładowanie” |
 
 ## Statusy zadań
 

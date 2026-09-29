@@ -2,9 +2,11 @@
 # and fills new UI strings in ui/locale-overlay/pl.json.
 #
 # Every run: merge upstream master into a fresh `pl-sync` branch cut from
-# `pl`, machine-translate new strings (only when ANTHROPIC_API_KEY is set),
-# validate, test and build the Polish UI, then open or refresh a PR into `pl`.
-# A merge conflict opens an issue instead; nothing is ever force-merged.
+# `pl`, validate, test and build the Polish UI, then open or refresh a PR into
+# `pl`. New strings are translated in a Claude Code session on the pl-sync
+# branch; paid API translation runs only on a manual run with
+# `machine_translate: true`. A merge conflict fails the run; nothing is ever
+# force-merged.
 # See ui/locale-overlay/README.md.
 name: pl-sync
 
@@ -13,6 +15,10 @@ on:
     - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
+      machine_translate:
+        description: Machine-translate new strings with the paid Anthropic API (off by default; strings are translated in a Claude Code session instead)
+        type: boolean
+        default: false
       max_strings:
         description: Maximum number of strings to machine-translate in this run
         default: "300"
@@ -36,6 +42,8 @@ jobs:
       BASE_BRANCH: pl
       SYNC_BRANCH: pl-sync
       HAS_TRANSLATOR_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      # API translation is opt-in per manual run; scheduled runs never spend API credits.
+      MACHINE_TRANSLATE: ${{ inputs.machine_translate == true }}
       # In a fork, gh defaults to the parent repository: without this every
       # PR, issue and label call would target paperclipai/paperclip.
       GH_REPO: ${{ github.repository }}
@@ -106,7 +114,7 @@ jobs:
         run: node cli/node_modules/tsx/dist/cli.mjs ui/locale-overlay/validate.ts --locale pl
 
       - name: Machine-translate new strings
-        if: env.HAS_TRANSLATOR_KEY == 'true'
+        if: env.HAS_TRANSLATOR_KEY == 'true' && env.MACHINE_TRANSLATE == 'true'
         working-directory: ui/locale-overlay/translator
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

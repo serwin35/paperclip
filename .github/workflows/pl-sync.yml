@@ -89,7 +89,16 @@ jobs:
           node-version: 24
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        # Upstream refreshes pnpm-lock.yaml in a separate bot PR, so master can
+        # lag behind a patch or manifest change. Like upstream CI, fall back to
+        # a refreshed lockfile for this run only; it is never committed here.
+        run: |
+          if ! pnpm install --frozen-lockfile; then
+            echo "::warning::Upstream pnpm-lock.yaml is stale; installing with a refreshed lockfile (not committed)."
+            echo "> Upstream \`pnpm-lock.yaml\` was stale; this run installed with a refreshed lockfile that is not committed." >> "$GITHUB_STEP_SUMMARY"
+            pnpm install --no-frozen-lockfile
+            git checkout -- pnpm-lock.yaml
+          fi
 
       - name: Validate overlay (dictionary rules, module override drift)
         id: validate

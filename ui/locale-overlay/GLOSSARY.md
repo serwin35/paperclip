@@ -60,6 +60,8 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | job (workspace, one-shot) | polecenie jednorazowe | obok „usługi” (services); nie „zadanie” |
 | job (plugin, scheduled) | zadanie w tle | |
 | checkout (git) | kopia robocza | |
+| worktree (git) | drzewo robocze | |
+| target (binding) | obiekt docelowy | nie „cel” (to goal) |
 | harness | silnik | Claude Code / Codex / Cursor jako środowisko agenta |
 | Chief of staff | Chief of staff | domyślna nazwa pierwszego agenta; zostaje po angielsku jak w danych |
 | Previous / Next | Wstecz / Dalej | |

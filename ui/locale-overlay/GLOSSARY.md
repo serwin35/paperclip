@@ -57,6 +57,10 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | usage | zużycie | |
 | effort (reasoning) | poziom rozumowania | |
 | Loading… | Wczytywanie… | nie „Ładowanie” |
+| job (workspace, one-shot) | polecenie jednorazowe | obok „usługi” (services); nie „zadanie” |
+| job (plugin, scheduled) | zadanie w tle | |
+| checkout (git) | kopia robocza | |
+| harness | silnik | Claude Code / Codex / Cursor jako środowisko agenta |
 
 ## Statusy zadań
 

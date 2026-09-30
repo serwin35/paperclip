@@ -1,3 +1,4 @@
+import { BrowserUseSettingsPanel } from "./app-detail/BrowserUseSettingsPanel";
 import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE, isRemoteMcpConnectorId, isRemoteMcpConnectorMethod } from "@paperclipai/shared";
 import { RemoteMcpManagement } from "@/features/connections/remote-mcp/RemoteMcpManagement";
 import { remoteMcpProviders } from "@/features/connections/remote-mcp/providers";
@@ -24,6 +25,7 @@ import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
+import { consumeSkillSourceReturn } from "@/lib/skill-source-connect-return";
 import { toolsApi } from "@/api/tools";
 import { agentsApi } from "@/api/agents";
 import { accessApi } from "@/api/access";
@@ -212,13 +214,18 @@ export function AppDetail({ renderActions, onReconnect }: {
       || successNoticeShownFor.current === connection.id
     ) return;
     successNoticeShownFor.current = connection.id;
+    const skillSourcePath = selectedCompanyId === connection.companyId
+      && connection.status === "active"
+      && appConnectionSourceSlug(connection) === "github"
+      ? consumeSkillSourceReturn(connection.companyId)
+      : null;
     pushToast({
       title: `${appName} connected`,
-      body: "The connection is ready. Review permissions or test an action below.",
+      body: skillSourcePath ? "Choose a repository to import your skills." : "The connection is ready. Review permissions or test an action below.",
       tone: "success",
     });
-    navigate(appTabHref(connection.id, "permissions"), { replace: true });
-  }, [activeTab, appName, connection, navigate, pushToast, searchParams]);
+    navigate(skillSourcePath ?? appTabHref(connection.id, "permissions"), { replace: true });
+  }, [activeTab, appName, connection, navigate, pushToast, searchParams, selectedCompanyId]);
 
   useEffect(() => {
     if (!activeTab) return;
@@ -614,6 +621,7 @@ export function AppDetail({ renderActions, onReconnect }: {
           : permissionsLoading
           ? <ToolsLoading />
           : <div className="space-y-10">
+              {connection.config?.sourceTemplateKey === "browser-use-cloud" && <BrowserUseSettingsPanel connection={connection} grants={grantsQuery.data} />}
               {connection.config?.sourceTemplateKey === "railway" && <RailwayAccessPanel connection={connection} grants={grantsQuery.data} />}
               {connection.config?.provider === "agentmail" && <EmailConnectionInboxes companyId={connection.companyId} connectionId={connection.id} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}
               {connection.config?.provider === "agentmail" ? <EmailConnectionAccess companyId={connection.companyId} connectionId={connection.id} agents={agents} /> : <>

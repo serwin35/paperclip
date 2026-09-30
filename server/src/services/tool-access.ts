@@ -1,3 +1,6 @@
+import { BROWSER_USE_TOOLS } from "@paperclipai/shared";
+import { browserUseClient, isBrowserUseConnection } from "./browser-use-client.js";
+import { browserUseService } from "./browser-use.js";
 import { COGNEE_STDIO_TEMPLATE, cogneeCloudUrl } from "./cognee-connection.js";
 import { isMemoryConnectorId, isRemoteMcpConnectorMethod, connectionPurposeTransportSchema } from "@paperclipai/shared";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -2359,6 +2362,9 @@ export function classifyRisk(
     if (annotations.readOnlyHint === false || annotations.writeHint === true) return "write";
     return reviewedReads.has(tool.name) ? "read" : "write";
   }
+  if (sourceTemplateKey === "browser-use-cloud") {
+    return BROWSER_USE_TOOLS.find(t => t.name === tool.name)?.annotations.readOnlyHint ? "read" : "destructive";
+  }
   if (sourceTemplateKey === "railway") {
     const reviewed = railwayRisk(normalizedToolName);
     return reviewed === "read" && (annotations.readOnlyHint === false || annotations.writeHint === true) ? "write" : reviewed;
@@ -2985,6 +2991,23 @@ function readStdioTemplateId(config: Record<string, unknown>): string {
     );
   }
   return templateId.trim();
+}
+
+async function gitHubReadGrantAccess(db: Db, companyId: string, connectionId: string, userId: string | null, localTrusted: boolean) {
+  const [connection] = await db.select().from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.id, connectionId)));
+  if (!connection || !connection.enabled || connection.status !== "active" || asRecord(connection.config).sourceTemplateKey !== "github") {
+    throw forbidden("GitHub connection is unavailable. Choose a connection you can use.");
+  }
+  const [membership] = userId ? await db.select().from(companyMemberships).where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalId, userId), eq(companyMemberships.principalType, "user"), eq(companyMemberships.status, "active"))) : [];
+  if (!localTrusted && (!membership || membership.membershipRole === "viewer")) throw forbidden("GitHub access requires an active company member.");
+  const grants = await db.select().from(connectionGrants).where(and(eq(connectionGrants.companyId, companyId), eq(connectionGrants.connectionId, connectionId)));
+  const members = await db.select().from(connectionGrantMembers).where(eq(connectionGrantMembers.companyId, companyId));
+  const allowed = grants.filter(grant => !(grant.kind === "organization" && ["per_user", "per_agent"].includes(connection.credentialPolicy)) && canBrowseProjectRepositoryGrant({
+    grant, userId, activeMember: localTrusted || Boolean(membership), audience: members.filter(member => member.grantId === grant.id).map(member => member.subjectId),
+  }));
+  const legacyShared = !grants.length && connection.credentialPolicy === "shared";
+  if (!allowed.length && !legacyShared) throw forbidden("Choose a GitHub connection with an active authorization you can use.");
+  return { connection, allowed, legacyShared };
 }
 
 export function toolAccessService(
@@ -6438,6 +6461,12 @@ export function toolAccessService(
     });
     emitConnectionUpdated(archived.connection, connection, "archive");
 
+    // Hosted work needs its credential to stop. Agent/viewer access is already
+    // revoked above; retain cleanup authority until provider shutdown confirms.
+    if (isBrowserUseConnection(connection)) {
+      await browserUseService(db, options.remoteHttpRequest).stopBeforeCredentialRemoval(connection.companyId, connection.id);
+    }
+
     // Only now, with every access path closed, revoke the credentials. Each
     // `secrets.remove` marks the row deleted before it calls the provider, so a
     // provider error leaves an unresolvable secret and a resumable removal
@@ -7101,6 +7130,11 @@ export function toolAccessService(
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
+    if (isBrowserUseConnection(connection)) {
+      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
+      await browserUseClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), connection.id).probe();
+      return BROWSER_USE_TOOLS;
+    }
     if (isAgentMailConnection(connection)) {
       await validateAgentMailConnection(connection);
       return [];
@@ -7251,6 +7285,8 @@ export function toolAccessService(
           });
         for (const grant of grantsToCheck)
           await refreshManagedGitHubGrantAccess(connection, grant, actor);
+      } else if (isBrowserUseConnection(connection)) {
+        await discoverTools(connection, undefined, actor);
       } else if (isAgentMailConnection(connection)) {
         await validateAgentMailConnection(connection);
       } else if (connection.transport === "mcp_remote") {
@@ -7283,6 +7319,8 @@ export function toolAccessService(
         config.sourceTemplateKey === "github" &&
           oauth.connectorProfile === "github.code"
           ? "GitHub account, installation, and repository access are available."
+          : isBrowserUseConnection(connection)
+            ? "Browser Use API key is connected."
           : isAgentMailConnection(connection)
             ? "AgentMail API key is connected."
             : connection.transport === "local_stdio"
@@ -12347,7 +12385,7 @@ export function toolAccessService(
         ? splitRemoteUrlCredential(input.link)
         : null;
     const baseConfig =
-      transport === "mcp_remote"
+      (transport === "mcp_remote" || transport === "rest_api")
         ? {
             url:
               (remoteMcpConnector ? remoteUrlCredential?.publicUrl : undefined) ??
@@ -12701,7 +12739,7 @@ export function toolAccessService(
                 applicationKey: `app-gallery:${galleryEntry?.slug ?? "link"}:${randomUUID()}`,
                 name: applicationName,
                 description: safeApplicationDescription,
-                type: transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+                type: transport === "rest_api" && galleryEntry?.slug === "browser-use-cloud" ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
                 status: "draft",
                 metadata: galleryEntry
                   ? {
@@ -17208,7 +17246,48 @@ export function toolAccessService(
 
     // Repository discovery uses credential audiences, not connection-management
     // visibility. An administrator cannot browse another user's private repos.
-    listProjectRepositories: async (
+    listProjectRepositories: async (companyId: string, userId: string | null, localTrusted = false) =>
+      toolAccessService(db).listGitHubRepositories(companyId, userId, localTrusted),
+
+    // Return identifiers, never credentials, so each attempted read can recheck its grant.
+    githubReadConnectionIds: async (companyId: string, userId: string | null, localTrusted = false): Promise<string[]> => {
+      const connections = await db.select().from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.enabled, true))).orderBy(desc(toolConnections.updatedAt));
+      const ids: string[] = [];
+      for (const connection of connections) {
+        if (connection.status !== "active" || asRecord(connection.config).sourceTemplateKey !== "github") continue;
+        try {
+          await gitHubReadGrantAccess(db, companyId, connection.id, userId, localTrusted);
+          ids.push(connection.id);
+        } catch (error) {
+          // Only ineligible grants are skipped; database/service failures must surface.
+          if (!(error instanceof Error && "status" in error && error.status === 403)) throw error;
+        }
+      }
+      return ids;
+    },
+
+    githubReadGrantIds: async (companyId: string, connectionId: string, userId: string | null, localTrusted = false): Promise<Array<string | null>> => {
+      const { allowed, legacyShared } = await gitHubReadGrantAccess(db, companyId, connectionId, userId, localTrusted);
+      return legacyShared ? [null] : allowed.map(grant => grant.id);
+    },
+
+    // Server-side reads share the same grant audience and credential lifecycle as discovery.
+    githubReadHeaders: async (companyId: string, connectionId: string, userId: string | null, localTrusted = false, forceRefresh = false, grantId?: string | null): Promise<Record<string, string>> => {
+      const { connection, allowed, legacyShared } = await gitHubReadGrantAccess(db, companyId, connectionId, userId, localTrusted);
+      const actor: ActorInfo = { actorType: "user", actorId: userId ?? "board" };
+      if (legacyShared && !grantId) return resolveCredentialHeaders(connection, actor);
+      let grant = grantId ? allowed.find(candidate => candidate.id === grantId) : allowed.length === 1 ? allowed[0] : undefined;
+      if (!grant) throw forbidden("Choose an active GitHub authorization you can use.");
+      if (asRecord(asRecord(connection.config).oauth).connectorProfile === "github.code") {
+        grant = await refreshOAuthGrantCredentials({ companyId, connectionId, grantId: grant.id, actor, forceRefresh });
+      }
+      const ref = grant.credentialSecretRefs.find(ref => ref.configPath === "oauth.access_token" || /authorization|token|api_key/i.test(ref.configPath));
+      if (!ref) throw unprocessable("Reconnect GitHub to read repository files.");
+      const secret = await resolveOAuthGrantSecret(connection, grant, ref, actor, undefined);
+      return { Authorization: `Bearer ${secret.value}` };
+    },
+
+    listGitHubRepositories: async (
       companyId: string,
       userId: string | null,
       localTrusted = false,
@@ -17249,6 +17328,7 @@ export function toolAccessService(
         string,
         import("@paperclipai/shared").ProjectRepository
       >();
+      const usableConnections: Array<{ id: string; name: string }> = [];
       let connectionCount = 0;
       let failedConnectionCount = 0;
       for (const connection of connections) {
@@ -17283,6 +17363,7 @@ export function toolAccessService(
           (localTrusted || (!!userId && memberships.length > 0));
         if (!availableGrants.length && !legacyShared) continue;
         connectionCount += 1;
+        usableConnections.push({ id: connection.id, name: connection.name });
         const actor: ActorInfo = {
           actorType: "user",
           actorId: userId ?? "board",
@@ -17331,7 +17412,7 @@ export function toolAccessService(
               rows = await loadGitHubTokenRepositories(headers);
             }
             for (const row of rows) {
-              mergeProjectRepository(repositories, row, connection.name);
+              mergeProjectRepository(repositories, row, connection.name, connection.id);
             }
           } catch {
             // Credential/provider errors may contain secrets. Only expose an
@@ -17345,6 +17426,7 @@ export function toolAccessService(
         repositories: [...repositories.values()].sort((a, b) =>
           a.fullName.localeCompare(b.fullName),
         ),
+        connections: usableConnections,
         connectionCount,
         failedConnectionCount,
       };
@@ -17448,7 +17530,7 @@ export function toolAccessService(
             companyId,
             applicationKey: normalizeKey(input.applicationName ?? input.name),
             name: input.applicationName ?? input.name,
-            type: transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+            type: isBrowserUseConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
             status: "active",
             metadata: {},
           })
@@ -19485,6 +19567,7 @@ export function toolAccessService(
         input.connectionId,
         input.companyId,
       );
+      if (isBrowserUseConnection(connection)) throw forbidden("Browser Use credentials stay in the governed tool gateway and cannot be exported.");
       if (connection.connectionPurpose === "ai") throw unprocessable("AI credentials are available only through the runtime resolver");
       const application = await getConnectionApplication(connection);
       const brokerEnabled = connectionTokenBrokerEnabled(connection);

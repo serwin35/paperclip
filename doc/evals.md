@@ -90,6 +90,10 @@ authentication respectively. Keep their results separate; the subscription
 fixture seeds an explicitly supplied login and does not qualify interactive
 login. See the [Grok fixture contract](../tests/runner-e2e/README.md#grok-build-qualification).
 
+The explicit [Direct blocker guidance suite](../tests/runner-e2e/README.md#direct-blocker-guidance)
+checks the legacy coordination skill against human authority, missing hiring
+permission, and requester scope decisions through saved browser interactions.
+
 ## Validation ladder
 
 Start with credential-free checks and a catalog listing. For Product E2E:
@@ -362,3 +366,8 @@ Copilot and Pi ACP profiles on local and Daytona. See the
 [fixture admission, credentials and budget contract](../tests/runner-e2e/README.md#extended-acp-harnesses-explicit-only).
 The private Runner Evals campaign of the same name provides complementary
 semantic protocol cases; catalog membership is not live qualification.
+
+The explicit-only Product E2E `confirmation-replies` suite tests conversational
+approval and rejection, persisted message provenance, approval before execution,
+ambiguous proposals, and the existing card-click path with native Claude/Codex.
+See the [suite contract](../tests/runner-e2e/README.md#conversational-confirmation-replies-explicit-only).

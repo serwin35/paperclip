@@ -103,6 +103,12 @@ provider and window it computes how much of the window has elapsed
 | `half` | Either window is ahead of its target | half of `maxConcurrentRuns`, rounded up |
 | `full` | Otherwise | `maxConcurrentRuns` |
 
+A provider can report more than one window of a kind; for example, Codex can
+report two weekly windows. Then the most constraining window decides: the
+limits use the highest usage of the kind, and the pace uses the window that is
+furthest ahead. A window without a reset time or length has no pace target,
+but its usage still counts toward the limits.
+
 Pacing changes only how many new runs start. It never cancels a running run
 and it never changes agent configuration. When a provider's mode relaxes,
 queued runs start at once. Other adapters are not paced.
@@ -110,6 +116,10 @@ queued runs start at once. Other adapters are not paced.
 Pacing fails open. When quota data is missing, or older than three poll
 intervals, the provider runs at `full` and the server logs a warning. A
 failed poll keeps the last good result and backs off.
+
+Pacing and the Costs page share one quota request per provider. The server
+reuses a result for 60 seconds (a failed result for 10 seconds), so opening
+the page does not add provider requests on top of the pacing poll.
 
 Pacing reads the quota of the subscription login on the machine that runs
 Paperclip. Agents that run under another account use that login's windows.

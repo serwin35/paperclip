@@ -27229,6 +27229,15 @@ export function heartbeatService(
 
       const cancelledRunsToEmit: (typeof heartbeatRuns.$inferSelect)[] = [];
 
+      // Warm the memoized lookups that read through the pool (`db`) before the
+      // transaction. Running them while `tx` holds a connection and the issue row
+      // lock deadlocks the pool once as many wakes run at once as it has
+      // connections. Failures are left to the original call inside the transaction.
+      await resolveQueuedResponsibleUserId().catch(() => undefined);
+      if (isolatedWorkspacesEnabled) {
+        await resolveHasResolvablePriorSessionWorkspace().catch(() => undefined);
+      }
+
       const outcome = await db
         .transaction(async (tx) => {
           await tx.execute(

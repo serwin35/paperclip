@@ -10,6 +10,7 @@ import {
   appSupportsCatalogSetup,
   getAvailableConnectionMethod,
   getAppDefinitionForUrl,
+  getConnectableAppDefinition,
   getRecommendedConnectionMethod,
   recommendedDefaultsForApp,
   resolveConnectionMethodServerUrl,
@@ -261,7 +262,7 @@ describe("AppDefinition catalog", () => {
         "google-workspace-search",
       ]),
     );
-    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(48);
+    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(49);
     expect(BLOCKED_MCP_PROVIDERS.map((entry) => entry.slug)).toEqual([
       "g2",
       "vercel",
@@ -284,6 +285,17 @@ describe("AppDefinition catalog", () => {
     for (const entry of BLOCKED_MCP_PROVIDERS)
       expect(connectableSlugs.has(entry.slug)).toBe(false);
   });
+  it("separates GitHub tools from the review bot without changing the provider identity", () => {
+    const github = getConnectableAppDefinition("github")!;
+    const bot = getConnectableAppDefinition("github-code-review-bot")!;
+    expect(github.methods.map((method) => method.key)).toEqual(["managed", "mcp-key"]);
+    expect(github.methods.every((method) => method.purpose === "tool")).toBe(true);
+    expect(bot.name).toBe("GitHub Code Review Bot");
+    expect(bot.methods).toHaveLength(1);
+    expect(bot.methods[0]).toMatchObject({ provider: "github", purpose: "channel", transport: "chat_sdk" });
+    expect(bot.branding).toEqual(github.branding);
+    expect(bot.urlPatterns).toEqual([]);
+  });
   it("registers the five native chat providers with only required setup credentials", () => {
     const expected = {
       slack: {
@@ -292,11 +304,11 @@ describe("AppDefinition catalog", () => {
         resources: ["workspace", "channel"],
         tool: true,
       },
-      github: {
+      "github-code-review-bot": {
         credentials: ["appId", "privateKey"],
         publicFields: ["appId"],
         resources: ["organization", "repository"],
-        tool: true,
+        tool: false,
       },
       discord: {
         credentials: ["botToken", "applicationId", "guildId"],
@@ -329,7 +341,7 @@ describe("AppDefinition catalog", () => {
         key: "chat-agent",
         label: "Chat with an agent",
         purpose: "channel",
-        provider: slug,
+        provider: slug === "github-code-review-bot" ? "github" : slug,
         transport: "chat_sdk",
         auth: "api_key",
         ownershipModes: ["customer"],
@@ -374,20 +386,20 @@ describe("AppDefinition catalog", () => {
       APP_DEFINITIONS.find((app) => app.slug === slug)?.methods.find(
         (method) => method.purpose === "channel",
       );
-    expect(channel("github")?.guidanceMd).toContain("issue_comment");
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain("issue_comment");
     expect(channel("discord")?.guidanceMd).toContain("Message Content intent");
     expect(channel("discord")?.guidanceMd).toContain("Discord thread");
-    expect(channel("github")?.guidanceMd).toContain("pull_request");
-    expect(channel("github")?.guidanceMd).toContain(
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain("pull_request");
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain(
       "pull_request_review_comment",
     );
-    expect(channel("github")?.guidanceMd).toContain(
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain(
       "installation_repositories",
     );
-    expect(channel("github")?.guidanceMd).toContain(
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain(
       "Generate the webhook secret in Paperclip",
     );
-    expect(channel("github")?.guidanceMd).toContain("SSL-verified");
+    expect(channel("github-code-review-bot")?.guidanceMd).toContain("SSL-verified");
     expect(channel("microsoft-teams")?.guidanceMd).toContain(
       "resource-specific",
     );
@@ -414,15 +426,15 @@ describe("AppDefinition catalog", () => {
     expect(channel("slack")?.guidanceMd).toContain("reactions");
     expect(channel("slack")?.guidanceMd).toContain("direct messages");
   });
-  it("keeps a complete, unique, dated evidence ledger for all 51 researched MCP providers", () => {
+  it("keeps a complete, unique, dated evidence ledger for all 52 researched MCP providers", () => {
     // Ledger-wide date reflects the last full re-verification (2026-08-26);
     // later provider additions carry their own research evidence, but
     // bumping the shared date would overstate freshness for the other providers.
     expect(SELF_SERVE_MCP_RESEARCH.verifiedAt).toBe("2026-08-26");
-    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(51);
+    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(52);
     expect(
       new Set(SELF_SERVE_MCP_RESEARCH.entries.map((entry) => entry.slug)),
-    ).toHaveProperty("size", 51);
+    ).toHaveProperty("size", 52);
     for (const entry of SELF_SERVE_MCP_RESEARCH.entries) {
       expect(new URL(entry.docsUrl).protocol).toBe("https:");
       expect(new URL(entry.serverUrl).protocol).toBe("https:");
@@ -560,7 +572,11 @@ describe("AppDefinition catalog", () => {
         (field) => field.key === "readOnly",
       )?.defaultValue,
     ).toBe(false);
-    expect(method("asana")?.ownershipModes).toEqual(["customer"]);
+    // Asana and Linear both advertise dynamic client registration and issue
+    // clients on request (verified live 2026-09-28), so neither needs an
+    // operator-registered OAuth app. "customer" stays as the manual fallback.
+    expect(method("asana")?.ownershipModes).toEqual(["dcr", "customer"]);
+    expect(method("linear")?.ownershipModes).toEqual(["dcr", "customer"]);
     expect(method("zapier")).toMatchObject({
       key: "generated-url",
       auth: "none",
@@ -605,7 +621,7 @@ describe("AppDefinition catalog", () => {
       APP_DEFINITIONS.find((app) => app.slug === "hugging-face")?.methods[0]
         ?.defaults?.scopesHint,
     ).toEqual(["read-mcp", "read-repos", "contribute-repos", "jobs"]));
-  it("defaults every new connection action to allowed", () => {
+  it("defaults every action, reads and writes, to allowed", () => {
     for (const app of APP_DEFINITIONS)
       for (const method of app.methods)
         expect(recommendedDefaultsForApp(app, method.key)).toEqual({
@@ -707,7 +723,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(57);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(58);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );

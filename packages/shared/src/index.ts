@@ -333,6 +333,13 @@ export {
   recommendedDefaultsForApp,
   resolveConnectionMethodServerUrl,
 } from "./app-definitions.js";
+export {
+  connectionSetupStateForApp,
+  connectionSetupStateForMethod,
+  connectionSetupVerbForApp,
+  connectionSetupVerbForMethod,
+  type ConnectionSetupState,
+} from "./connection-setup-state.js";
 export { APP_DEFINITIONS } from "./app-definitions.generated.js";
 export * from "./google-workspace-connectors.js";
 export * from "./github-connectors.js";
@@ -1968,6 +1975,8 @@ export {
   type CompanySearchExtractQuery,
   type CompanySearchQuery,
   createIssueSchema,
+  setIssueTitleSchema,
+  type SetIssueTitle,
   createIssueInputSchema,
   createChildIssueSchema,
   createAcceptedPlanDecompositionSchema,

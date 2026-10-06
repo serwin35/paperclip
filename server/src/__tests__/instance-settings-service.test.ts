@@ -26,6 +26,7 @@ describe("instance settings service", () => {
     expect(normalizeExperimentalSettings({
       enableEnvironments: true,
       enableNativeRunner: false,
+      enableAiConnectionRouters: false,
       enableManagedSandboxOnly: false,
       enableIsolatedWorkspaces: true,
       enableIssuePlanDecompositions: true,
@@ -41,6 +42,7 @@ describe("instance settings service", () => {
     })).toEqual({
       enableEnvironments: true,
       enableNativeRunner: false,
+      enableAiConnectionRouters: false,
       enableManagedSandboxOnly: false,
       enableIsolatedWorkspaces: true,
       enableIsolatedWorkspacesByDefault: false,
@@ -49,6 +51,7 @@ describe("instance settings service", () => {
       enableApps: true,
     enableMcpAggregators: true,
       enableAgentChat: false,
+      enablePublicMcp: false,
       enableCombinedInboxTasks: false,
       enableChatConnectors: false,
       enableMemoryConnectors: false,

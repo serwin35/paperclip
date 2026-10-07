@@ -4,6 +4,7 @@ import { DEFAULT_QUOTA_PACING_SETTINGS, type ProviderQuotaResult } from "@paperc
 vi.mock("../adapters/registry.js", () => ({
   listServerAdapters: vi.fn(),
 }));
+vi.mock("../middleware/logger.js", () => ({ logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
 import { listServerAdapters } from "../adapters/registry.js";
 import {
@@ -34,6 +35,7 @@ function deferred<T>() {
 function registerAdapters(...adapters: Array<{ type: string; getQuotaWindows: () => Promise<ProviderQuotaResult> }>) {
   vi.mocked(listServerAdapters).mockReturnValue(adapters as never);
 }
+import { logger } from "../middleware/logger.js";
 
 describe("fetchAllQuotaWindows", () => {
   beforeEach(() => {
@@ -63,7 +65,7 @@ describe("fetchAllQuotaWindows", () => {
       {
         provider: "anthropic",
         ok: false,
-        error: "quota polling timed out after 20s",
+        error: "Subscription quota is currently unavailable. Check usage with your provider.",
         windows: [],
         fetchedAt: new Date(NOW.getTime() + 20_000).toISOString(),
       },
@@ -74,7 +76,7 @@ describe("fetchAllQuotaWindows", () => {
     registerAdapters({ type: "codex_local", getQuotaWindows: vi.fn().mockRejectedValue(new Error("boom")) });
 
     expect(await fetchAllQuotaWindows()).toEqual([
-      { provider: "openai", ok: false, error: "Error: boom", windows: [], fetchedAt: NOW.toISOString() },
+      { provider: "openai", ok: false, error: "Subscription quota is currently unavailable. Check usage with your provider.", windows: [], fetchedAt: NOW.toISOString() },
     ]);
   });
 
@@ -121,7 +123,7 @@ describe("fetchAllQuotaWindows", () => {
       { type: "claude_local", getQuotaWindows: claudeQuota },
     );
 
-    expect((await fetchAllQuotaWindows())[1]).toMatchObject({ ok: false, error: "rate limited" });
+    expect((await fetchAllQuotaWindows())[1]).toMatchObject({ ok: false, error: "Subscription quota is currently unavailable. Check usage with your provider." });
     // A burst of callers right after the failure reuses it.
     await vi.advanceTimersByTimeAsync(QUOTA_WINDOWS_ERROR_CACHE_TTL_MS - 1);
     expect((await fetchAllQuotaWindows())[1]).toMatchObject({ ok: false });
@@ -169,5 +171,43 @@ describe("fetchAllQuotaWindows", () => {
       lastPolledAt: NOW.toISOString(),
     });
     controller.stop();
+  });
+
+  it("keeps command diagnostics out of API responses and redacts them in server logs", async () => {
+    const diagnostic = 'Command failed: sh -c probe --token fixture-private-token';
+    vi.mocked(listServerAdapters).mockReturnValue([
+      { type: "claude_local", getQuotaWindows: vi.fn().mockResolvedValue({
+        provider: "anthropic", ok: false, windows: [], error: diagnostic,
+      }) },
+      { type: "codex_local", getQuotaWindows: vi.fn().mockRejectedValue(new Error(diagnostic)) },
+    ] as never);
+
+    const results = await fetchAllQuotaWindows();
+    expect(results).toHaveLength(2);
+    for (const result of results) {
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("Subscription quota is currently unavailable. Check usage with your provider.");
+    }
+    expect(JSON.stringify(results)).not.toContain("Command failed");
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({
+      adapterType: "claude_local", diagnostic: expect.stringContaining("Command failed"),
+    }), "Provider subscription quota unavailable");
+    expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain("fixture-private-token");
+  });
+
+  it("isolates synchronous probe failures and preserves structured auth failure information", async () => {
+    vi.mocked(listServerAdapters).mockReturnValue([
+      { type: "claude_local", getQuotaWindows: () => { throw new Error("local command unavailable"); } },
+      { type: "codex_local", getQuotaWindows: vi.fn().mockResolvedValue({
+        provider: "openai", source: "codex-rpc", ok: false,
+        errorFamily: "refresh_token_expired", error: "private diagnostic", windows: [],
+      }) },
+    ] as never);
+    const results = await fetchAllQuotaWindows();
+    expect(results[0]).toMatchObject({ provider: "anthropic", ok: false });
+    expect(results[1]).toMatchObject({
+      provider: "openai", source: "codex-rpc", ok: false, errorFamily: "refresh_token_expired",
+    });
+    expect(JSON.stringify(results)).not.toContain("private diagnostic");
   });
 });

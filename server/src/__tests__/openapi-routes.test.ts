@@ -34,6 +34,7 @@ const apiPrefixes: Record<string, string> = {
   "slack-tools.ts": "/api",
   "email.ts": "/api",
   "cloud.ts": "/api/cloud",
+  "customer-success.ts": "/api/customer-success/v1",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
   "company-skill-policy.ts": "/api",
@@ -94,6 +95,11 @@ const HTTP_METHODS = new Set([
 const explicitOpenApiCoverageExclusions = new Set<string>();
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
+  // Inspection uses its own versioned Cloud-permit/managed-run protocol,
+  // documented in CUSTOMER-SUCCESS-INSPECTION.md and the shared contract.
+  // Ordinary board sessions and agent API keys cannot invoke these endpoints.
+  "GET /api/customer-success/v1/run-authority",
+  "POST /api/customer-success/v1/read",
   // OAuth discovery and protocol endpoints have their own metadata contract;
   // browser connection-management operations remain documented in the board API.
   "GET /.well-known/oauth-authorization-server",
@@ -238,6 +244,19 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents manager-only task privacy hints without protected scope identity", () => {
+    const spec = buildOpenApiSpec() as any;
+    const operation = spec.paths["/api/issues/{id}/privacy-constraints"].get;
+    const schema = operation.responses["200"].content["application/json"].schema;
+    expect(schema.properties).toEqual({
+      publicBlockedBy: { type: "string", enum: ["parent", "project"], nullable: true },
+      leavesPersonalProject: { type: "boolean" },
+    });
+    expect(schema.required).toEqual(["publicBlockedBy", "leavesPersonalProject"]);
+    expect(operation.responses["403"]).toBeDefined();
+    expect(operation.responses["404"]).toBeDefined();
+  });
+
   it("documents strict run-attributed feedback without a read endpoint", () => {
     const { spec } = loadSpecRoutes();
     const path = spec.paths["/api/companies/{companyId}/agent-commentary"];

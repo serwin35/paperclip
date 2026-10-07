@@ -43,6 +43,43 @@ const { WebSocket, WebSocketServer } = require("ws") as {
 import { authorizationService, type AuthorizationActor } from "../services/authorization.js";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
 
+interface ReadableIssue {
+  id: string;
+  identifier: string | null;
+  title: string;
+}
+
+// Scalar change fields an issue toast and its query invalidation read. Other
+// details (descriptions, comment bodies, referenced tasks) stay behind HTTP reads.
+const ISSUE_ACTIVITY_DETAIL_KEYS = [
+  "status", "priority", "assigneeAgentId", "assigneeUserId", "reopened", "reopenedFrom",
+  "updated", "source", "commentId", "key", "documentKey",
+] as const;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function isScalar(value: unknown) {
+  return value === null || typeof value === "string" || typeof value === "boolean";
+}
+
+// Without these the browser names the task "Task 1df252ds" whenever it is not
+// in its query cache. The identifier and title come from the task row the
+// viewer was just authorized to read, never from the event details.
+function issueActivityToastFields(payload: Record<string, unknown>, issue: ReadableIssue) {
+  const details = asRecord(payload.details) ?? {};
+  const visible: Record<string, unknown> = { issueTitle: issue.title };
+  if (issue.identifier) visible.identifier = issue.identifier;
+  if (typeof details.title === "string") visible.title = issue.title;
+  for (const key of ISSUE_ACTIVITY_DETAIL_KEYS) {
+    if (isScalar(details[key])) visible[key] = details[key];
+  }
+  const previousStatus = asRecord(details._previous)?.status;
+  if (typeof previousStatus === "string") visible._previous = { status: previousStatus };
+  return { issueId: issue.id, actorType: payload.actorType, actorId: payload.actorId, details: visible };
+}
+
 interface UpgradeContext {
   actor: AuthorizationActor;
   apiKeyId?: string;
@@ -288,11 +325,13 @@ export function setupLiveEventsWebSocketServer(
       const payload = event.payload;
       const issueId = typeof payload.issueId === "string" ? payload.issueId
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
+      let readableIssue: ReadableIssue | null = null;
       if (issueId) {
-        const [issue] = await db.select({ id: issues.id }).from(issues)
+        const [issue] = await db.select({ id: issues.id, identifier: issues.identifier, title: issues.title }).from(issues)
           .where(and(eq(issues.id, issueId), eq(issues.companyId, event.companyId))).limit(1);
         if (!issue || !(await access.decide({ actor: context!.actor, action: "issue:read",
           resource: { type: "issue", companyId: event.companyId, issueId } })).allowed) return null;
+        readableIssue = issue;
       }
       if (payload.entityType === "project" && typeof payload.entityId === "string") {
         const [project] = await db.select({ id: projects.id }).from(projects)
@@ -309,9 +348,12 @@ export function setupLiveEventsWebSocketServer(
       if (event.type.startsWith("heartbeat.run.")) return runId ? event : null;
       if (event.type === "agent.session.goal.changed") return issueId ? event : null;
       // Company-wide invalidations carry no task-derived content. Authorized
-      // clients obtain details through viewer-filtered HTTP reads.
+      // clients obtain details through viewer-filtered HTTP reads. Activity on a
+      // task this viewer may read also keeps what its toast needs.
       if (event.type === "activity.logged") return { ...event, payload: {
         action: payload.action, entityType: payload.entityType, entityId: payload.entityId,
+        ...(readableIssue && payload.entityType === "issue" && payload.entityId === readableIssue.id
+          ? issueActivityToastFields(payload, readableIssue) : {}),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "external_object.updated") return { ...event, payload: { externalObjectId: payload.externalObjectId } };

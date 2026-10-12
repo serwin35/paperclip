@@ -278,6 +278,9 @@ export interface AdapterExecutionTargetProcessOptions {
   stdin?: string;
   timeoutSec: number;
   graceSec: number;
+  /** Sandbox-only: request the provider's persistent process session for a
+   * long-lived command. The host still gates this on provider capabilities. */
+  useSession?: boolean;
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onRuntimeProgress?: RuntimeStatusSink;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
@@ -881,6 +884,8 @@ export async function runAdapterExecutionTargetProcess(
         env,
         stdin: options.stdin,
         timeoutMs: options.timeoutSec > 0 ? options.timeoutSec * 1000 : target.timeoutMs ?? undefined,
+        ...(options.useSession !== undefined ? { useSession: options.useSession } : {}),
+        ...(options.useSession === true ? { commandTimeoutMs: Math.max(0, options.timeoutSec) * 1000 } : {}),
         // The tail loop already streams incremental chunks; suppress the
         // runner's end-of-run batched onLog to avoid duplicate log bytes.
         onLog: runLogTail ? undefined : options.onLog,
@@ -1428,6 +1433,8 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
   workspaceLocalDir: string;
   timeoutSec?: number;
   workspaceRemoteDir?: string;
+  /** Sandbox transfer scratch, confined to the lease's reserved runtime tree. */
+  runtimeRootDir?: string;
   syncWorkspace?: boolean;
   workspaceInboundMode?: WorkspaceInboundMode;
   workspaceDurableSeed?: WorkspaceDurableSeedPaths;
@@ -1512,6 +1519,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     adapterKey: input.adapterKey,
     workspaceLocalDir: input.workspaceLocalDir,
     workspaceRemoteDir: input.workspaceRemoteDir,
+    runtimeRootDir: input.runtimeRootDir,
     syncWorkspace: input.syncWorkspace,
     workspaceInboundMode: input.workspaceInboundMode,
     workspaceDurableSeed: input.workspaceDurableSeed,
@@ -1553,11 +1561,13 @@ type GitHubLauncherLocation = {
   runId: string; target: AdapterExecutionTarget | null | undefined;
 };
 
-function githubOperationLauncherDirectory(input: GitHubLauncherLocation): string {
+/** Keep sandbox housekeeping within the producer-owned Runner runtime. */
+export function githubOperationLauncherDirectory(input: GitHubLauncherLocation): string {
   // Only controller-generated run IDs may name a removable directory.
   if (!/^[a-zA-Z0-9_-]+$/.test(input.runId)) throw new Error("Invalid GitHub launcher run ID");
   return input.target?.kind === "remote"
-    ? path.posix.join(input.target.remoteCwd, ".paperclip-runtime", "github", input.runId)
+    ? path.posix.join(input.target.remoteCwd, ".paperclip-runtime",
+        ...(input.target.transport === "sandbox" ? ["paperclip-runner"] : []), "github", input.runId)
     : path.join(os.tmpdir(), "paperclip-github-runtime", input.runId);
 }
 

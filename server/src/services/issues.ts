@@ -1,3 +1,4 @@
+import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
@@ -9,6 +10,7 @@ import { createdFromIssueCondition } from "./issue-creation-origin.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { Buffer } from "node:buffer";
+import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { isExplicitContinuationRetryClaim } from "./explicit-continuation-retry-claim.js";
 import { markdownToPlainText, parseMarkdown } from "chat";
@@ -10833,6 +10835,7 @@ export function issueService(db: Db) {
         actorRunStopId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
+        expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -10880,6 +10883,7 @@ export function issueService(db: Db) {
         actorRunStopId,
         actorUserId,
         companyGuard,
+        expectedExecutionPolicy,
         ...issueData
       } = data;
       // An explicit edit claims the title, even if it keeps the same text.
@@ -11172,6 +11176,14 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (expectedExecutionPolicy !== undefined && !isDeepStrictEqual(
+          receiptExisting.executionPolicy ?? null,
+          expectedExecutionPolicy,
+        )) {
+          throw conflict("The task execution settings changed. Try cancelling the monitor again.", {
+            code: "execution_policy_changed",
+          });
+        }
         if (changesPrivacy) {
           const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : receiptExisting.projectId;
           const [privacyProject] = nextProjectId ? await tx.select().from(projects)
@@ -13036,49 +13048,55 @@ export function issueService(db: Db) {
               );
         const publicationCreatedAt = new Date();
         for (const binding of bindings) {
-          await dbOrTx
-            .insert(chatPublications)
-            .values({
-              companyId: binding.companyId,
-              endpointId: binding.endpointId,
-              conversationId: binding.conversationId,
-              issueId,
-              commentId: comment.id,
-              idempotencyKey: `comment:${comment.id}:${binding.endpointId}`,
-              payload: projectSafeChatPublication({
-                classification: "external",
-                source: "agent_comment",
-                text: redactedBody,
-              }),
-              state: "pending",
-              createdAt: publicationCreatedAt,
-              updatedAt: publicationCreatedAt,
-            })
-            .onConflictDoNothing();
-          for (const [index, attachment] of boundAttachments.entries()) {
-            const attachmentCreatedAt = new Date(
-              publicationCreatedAt.getTime() + index + 1,
-            );
-            await dbOrTx
+          await dbOrTx.transaction(async (tx: DbTransaction) => {
+            await notifyChatPublicationWork(tx);
+            return tx
               .insert(chatPublications)
               .values({
                 companyId: binding.companyId,
                 endpointId: binding.endpointId,
                 conversationId: binding.conversationId,
                 issueId,
-                commentId: attachment.commentId,
-                idempotencyKey: `attachment:${attachment.id}:${binding.endpointId}`,
+                commentId: comment.id,
+                idempotencyKey: `comment:${comment.id}:${binding.endpointId}`,
                 payload: projectSafeChatPublication({
                   classification: "external",
                   source: "agent_comment",
-                  text: `Shared ${attachment.originalFilename ?? "a file"}.`,
-                  attachmentIds: [attachment.id],
+                  text: redactedBody,
                 }),
                 state: "pending",
-                createdAt: attachmentCreatedAt,
-                updatedAt: attachmentCreatedAt,
+                createdAt: publicationCreatedAt,
+                updatedAt: publicationCreatedAt,
               })
               .onConflictDoNothing();
+          });
+          for (const [index, attachment] of boundAttachments.entries()) {
+            const attachmentCreatedAt = new Date(
+              publicationCreatedAt.getTime() + index + 1,
+            );
+            await dbOrTx.transaction(async (tx: DbTransaction) => {
+              await notifyChatPublicationWork(tx);
+              return tx
+                .insert(chatPublications)
+                .values({
+                  companyId: binding.companyId,
+                  endpointId: binding.endpointId,
+                  conversationId: binding.conversationId,
+                  issueId,
+                  commentId: attachment.commentId,
+                  idempotencyKey: `attachment:${attachment.id}:${binding.endpointId}`,
+                  payload: projectSafeChatPublication({
+                    classification: "external",
+                    source: "agent_comment",
+                    text: `Shared ${attachment.originalFilename ?? "a file"}.`,
+                    attachmentIds: [attachment.id],
+                  }),
+                  state: "pending",
+                  createdAt: attachmentCreatedAt,
+                  updatedAt: attachmentCreatedAt,
+                })
+                .onConflictDoNothing();
+            });
           }
         }
       }
@@ -13322,6 +13340,7 @@ export function issueService(db: Db) {
             registeredRunId,
           );
           for (const binding of bindings) {
+            await notifyChatPublicationWork(tx);
             await tx
               .insert(chatPublications)
               .values({

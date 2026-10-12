@@ -2,7 +2,8 @@ import type { AgentAppearance } from "../agent-appearance.js";
 import type { BillingType, CostStatus } from "../constants.js";
 
 export interface CostEvent {
-  usageKind?: "agent" | "decision";
+  subscriptionId?: string | null;
+  usageKind?: "agent" | "decision" | "fast_response";
   responsibleUserId?: string | null;
   id: string;
   companyId: string;
@@ -174,6 +175,9 @@ export interface CostWindowSpendRow {
 export interface CostByProject {
   projectId: string | null;
   projectName: string | null;
+  /** Ledger events in this project and selected date range, not distinct runs. */
+  eventCount: number;
+  estimatedEventCount: number;
   costCents: number;
   costCentsExact?: string;
   inputTokens: number;

@@ -3,6 +3,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { installDatabaseWorkSignals } from "./work-signals.js";
 import * as schema from "./schema/index.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
@@ -268,6 +269,10 @@ export async function withDedicatedDbConnection<T>(db: Db, action: (dedicated: D
 
 export function createDb(url: string, options?: DatabaseClientOptions) {
   const resolved = resolveDatabaseClientOptions(options ?? databaseClientOptionsFromEnv());
+  return createDbClient(url, resolved);
+}
+
+function createDbClient(url: string, resolved: DatabaseClientOptions, owner?: object) {
   const sql = postgres(url, postgresJsOptions(resolved));
   const key = hostPortKeyOrNull(url);
   if (key) registerClient(key, sql);
@@ -275,10 +280,10 @@ export function createDb(url: string, options?: DatabaseClientOptions) {
   // postgres.js calls that error "write CONNECTION_CLOSED" too, so the
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
-  const db = drizzlePg(sql, { schema });
-  dedicatedDbFactories.set(db, () => createDb(url, {
+  const db = installDatabaseWorkSignals(drizzlePg(sql, { schema }), owner);
+  dedicatedDbFactories.set(db, () => createDbClient(url, {
     ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
-  }));
+  }, db));
   return db;
 }
 
@@ -462,12 +467,12 @@ async function recordMigrationHistoryEntry(
   );
 }
 
-// These idempotent privacy migrations commit keyset batches inside their DO
-// blocks. Execute each statement at top level so DDL locks and completed batches
-// are released before the next batch. History is recorded only after completion.
-const MIGRATIONS_WITH_BATCH_COMMITS = new Set([
+// These idempotent migrations require top-level statements for batch commits
+// or concurrent index builds. History is recorded only after completion.
+const MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS = new Set([
   "0313_private_task_access.sql",
   "0314_private_task_draft_assets.sql",
+  "0332_little_night_nurse.sql",
 ]);
 
 async function applyPendingMigrationsManually(
@@ -488,7 +493,13 @@ async function applyPendingMigrationsManually(
     try {
       // A session lock survives each batch COMMIT. Reserve the connection so
       // pool rotation cannot release it while another migrator is waiting.
-      await sql`SELECT pg_advisory_lock(hashtextextended('paperclip:migrations', 0))`;
+      // A blocking lock SELECT retains its statement snapshot while waiting.
+      // A partial concurrent index build can wait for that snapshot, forming a
+      // deadlock with this lock. Each failed try ends its snapshot before sleep.
+      while (!(await sql<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtextextended('paperclip:migrations', 0)) AS locked`)[0]?.locked) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
       const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
 
@@ -506,7 +517,7 @@ async function applyPendingMigrationsManually(
 
         const applyMigration = async () => {
           for (const statement of splitMigrationStatements(migrationContent)) {
-            if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
+            if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
               // A cancelled concurrent build leaves an invalid index. IF NOT
               // EXISTS alone would skip it on retry and journal an incomplete index.
               const index = statement.replace(/^\s*--.*$/gm, "").trim()
@@ -540,7 +551,7 @@ async function applyPendingMigrationsManually(
             folderMillisByFileName.get(migrationFile) ?? Date.now(),
           );
         };
-        if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
+        if (MIGRATIONS_WITH_TOP_LEVEL_STATEMENTS.has(migrationFile)) {
           await applyMigration();
         } else {
           await runInTransaction(sql, applyMigration);

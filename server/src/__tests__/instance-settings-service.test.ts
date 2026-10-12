@@ -30,6 +30,11 @@ describe("instance settings service", () => {
     const disabled = applyExperimentalSettingsPatch(enabled, { enableChatConnectors: false });
     expect(disabled).toMatchObject({ enableApps: true, enableChatConnectors: false });
   });
+  it("keeps GitHub review bots independent across legacy normalization and persistence", () => {
+    expect(normalizeExperimentalSettings({ enableChatConnectors: true })).toMatchObject({ enableChatConnectors: true, enableGitHubReviewBots: false });
+    const saved = applyExperimentalSettingsPatch({}, { enableGitHubReviewBots: true });
+    expect(normalizeExperimentalSettings(JSON.parse(JSON.stringify(saved)))).toMatchObject({ enableChatConnectors: false, enableGitHubReviewBots: true });
+  });
   it("ignores retired experimental flags without resetting current settings", () => {
     expect(normalizeExperimentalSettings({
       enableEnvironments: true,
@@ -63,6 +68,7 @@ describe("instance settings service", () => {
       enableOpenAiDot: false,
       enableCombinedInboxTasks: false,
       enableChatConnectors: false,
+      enableGitHubReviewBots: false,
       enableMemoryConnectors: false,
       enableConferenceRoomChat: false,
       enableClassicTaskInterface: false,
@@ -77,6 +83,7 @@ describe("instance settings service", () => {
       enableSummaries: false,
       enableStatusCards: false,
       enableDecisions: false,
+      enableFastResponses: false,
       enableGoalsSidebarLink: true,
       enableServerInfoDebugView: true,
       enablePaperclipDeveloperMode: true,

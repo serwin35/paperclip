@@ -85,6 +85,8 @@ describeEmbeddedPostgres("live activity events on a readable task", () => {
       expect(update?.payload).toEqual({
         action: "issue.updated", entityType: "issue", entityId: task.id, issueId: task.id,
         actorType: "agent", actorId: agent.id,
+        // Upstream activityToastIdentity: the actor's name and avatar for the toast.
+        actorName: "Coder", actorAppearance: null,
         details: {
           identifier: `${prefix}-12`, issueTitle: "Ship the release",
           status: "done", source: "api", _previous: { status: "in_progress" },

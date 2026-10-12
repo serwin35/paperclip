@@ -1,6 +1,7 @@
+import type { AgentLifecycleRequest, AgentLifecycleResult } from "@paperclipai/shared";
 import type { AiConnectionRouterRequest, AiConnectionRouterResult } from "@paperclipai/shared";
 import { environmentCreationCleanupErrorData } from "./environment-creation-cleanup.js";
-import { environmentSyncErrorData } from "./environment-sync-error.js";
+import { environmentSyncErrorData, withEnvironmentSyncErrorCapture } from "./environment-sync-error.js";
 import { createPluginIdleDrain } from "./idle-drain.js";
 /**
  * Worker-side RPC host — runs inside the child process spawned by the host.
@@ -1570,6 +1571,13 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
    * Dispatches to the correct handler based on the method name.
    */
   async function handleHostRequest(request: JsonRpcRequest): Promise<void> {
+    if (request.method === "environmentSyncOut") {
+      return withEnvironmentSyncErrorCapture(() => handleHostRequestInScope(request));
+    }
+    return handleHostRequestInScope(request);
+  }
+
+  async function handleHostRequestInScope(request: JsonRpcRequest): Promise<void> {
     const { id, method, params } = request;
     let done: (() => void) | undefined;
     try {
@@ -1593,7 +1601,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       sendMessage(createErrorResponse(id, errorCode, errorMessage,
         method === "environmentAcquireLease" || method === "environmentDestroyLease"
-          ? environmentCreationCleanupErrorData(err)
+          ? environmentCreationCleanupErrorData(err, method === "environmentAcquireLease")
           : method === "environmentSyncOut" ? environmentSyncErrorData(err) : undefined));
     } finally {
       done?.();
@@ -1652,6 +1660,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         return handleExecuteTool(params as ExecuteToolParams);
       case "detectExternalObjects":
         return handleDetectExternalObjects(params as DetectExternalObjectsParams);
+      case "agentLifecycle":
+        if (!plugin.definition.onAgentLifecycle) throw methodNotImplemented("agentLifecycle");
+        return plugin.definition.onAgentLifecycle(params as AgentLifecycleRequest);
       case "routeAiConnection":
         if (!plugin.definition.onRouteAiConnection) throw methodNotImplemented("routeAiConnection");
         return plugin.definition.onRouteAiConnection(params as AiConnectionRouterRequest);
@@ -1772,6 +1783,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     if (plugin.definition.onIdleDrain) supportedMethods.push("prepareIdleSleep", "releaseIdleSleep");
     if (plugin.definition.onApiRequest) supportedMethods.push("handleApiRequest");
     if (plugin.definition.onDetectExternalObjects) supportedMethods.push("detectExternalObjects");
+    if (plugin.definition.onAgentLifecycle) supportedMethods.push("agentLifecycle");
     if (plugin.definition.onRouteAiConnection) supportedMethods.push("routeAiConnection");
     if (plugin.definition.onResolveExternalObject) supportedMethods.push("resolveExternalObject");
     if (plugin.definition.onRefreshExternalObjects) supportedMethods.push("refreshExternalObjects");

@@ -856,62 +856,62 @@ const preview: Preview = {
           "Overview",
           "Getting started and access",
           [
-            "Onboarding and first work",
-            "Login, invitations, and access",
-            "Companies and portability"
+            "Onboarding and first work", ["Overview", "*"],
+            "Login, invitations, and access", ["Overview", "*"],
+            "Companies and portability", ["Overview", "*"]
           ],
           "Tasks and conversations",
           [
-            "Task creation and lifecycle",
-            "Delegation, dependencies, and signoff",
-            "Inbox, decisions, and search",
-            "Agent conversations and project handoff",
-            "Questions and approvals",
-            "Steering and queued messages",
-            "Documents, attachments, and work products"
+            "Task creation and lifecycle", ["Overview", "*"],
+            "Delegation, dependencies, and signoff", ["Overview", "*"],
+            "Inbox, decisions, and search", ["Overview", "*"],
+            "Agent conversations and project handoff", ["Overview", "*"],
+            "Questions and approvals", ["Overview", "*"],
+            "Steering and queued messages", ["Overview", "*"],
+            "Documents, attachments, and work products", ["Overview", "*"]
           ],
           "Agents and reusable capabilities",
           [
-            "Hiring, configuration, and organization",
-            "Runs, harnesses, and model accounts",
-            "Skills and Skill Studio",
-            "Team packages and installation"
+            "Hiring, configuration, and organization", ["Overview", "*"],
+            "Runs, harnesses, and model accounts", ["Overview", "*"],
+            "Skills and Skill Studio", ["Overview", "*"],
+            "Team packages and installation", ["Overview", "*"]
           ],
           "Projects and execution",
           [
-            "Projects and repositories",
-            "Goals and work alignment",
-            "Workspaces, services, and files",
-            "Execution environments",
-            "Recovery"
+            "Projects and repositories", ["Overview", "*"],
+            "Goals and work alignment", ["Overview", "*"],
+            "Workspaces, services, and files", ["Overview", "*"],
+            "Execution environments", ["Overview", "*"],
+            "Recovery", ["Overview", "*"]
           ],
           "Apps, channels, and extensions",
           [
-            "Connection setup",
-            "App access and action permissions",
-            "External chat and email",
-            "Tool gateways and access profiles",
-            "Secrets and proposals",
-            "Plugins"
+            "Connection setup", ["Overview", "*"],
+            "App access and action permissions", ["Overview", "*"],
+            "External chat and email", ["Overview", "*"],
+            "Tool gateways and access profiles", ["Overview", "*"],
+            "Secrets and proposals", ["Overview", "*"],
+            "Plugins", ["Overview", "*"]
           ],
           "Automation and structured work",
           [
-            "Routines, schedules, and triggers",
-            "Pipelines, review queues, and learnings",
-            "Cases",
-            "Status cards"
+            "Routines, schedules, and triggers", ["Overview", "*"],
+            "Pipelines, review queues, and learnings", ["Overview", "*"],
+            "Cases", ["Overview", "*"],
+            "Status cards", ["Overview", "*"]
           ],
           "Oversight and operation",
           [
-            "Costs and budgets",
-            "Dashboards and audit trails",
-            "Navigation, profile, and announcements",
-            "Instance operations",
-            "CLI/API and local worktrees"
+            "Costs and budgets", ["Overview", "*"],
+            "Dashboards and audit trails", ["Overview", "*"],
+            "Navigation, profile, and announcements", ["Overview", "*"],
+            "Instance operations", ["Overview", "*"],
+            "CLI, API and local worktrees", ["Overview", "*"]
           ],
           "Contributor surfaces",
           [
-            "Developer previews and diagnostic labs"
+            "Developer previews and diagnostic labs", ["Overview", "*"]
           ],
           "Foundations"
         ],

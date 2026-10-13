@@ -25,3 +25,8 @@ export const skillSourceSelectionSchema = z.object({
   excludedFolders: z.array(repoPath).max(10000),
   connectionId: z.string().uuid().nullable().optional(),
 });
+
+export const skillSourceDisconnectSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  skills: z.enum(['copy', 'delete']),
+});

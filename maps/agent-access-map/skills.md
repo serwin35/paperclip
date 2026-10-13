@@ -2,7 +2,9 @@
 
 Product map: [Skill discovery, authoring, and policy](../feature-map/skills.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -122,8 +124,8 @@ API: `present` — representative operation IDs:
 
 - `POST /api/companies/{companyId}/skills/{skillId}/test-runs`.
 
-Agent access: `partial` — Permitted agent REST; native read fallback for history; no
-dedicated CLI test command found.
+Agent access: `available` — Permitted agent REST / native `call_api` creation, control
+and history; no dedicated CLI test command found.
 
 Policy: Company skill policy by action/resource plus platform invariants; test execution
 additionally requires task-assignment authority.
@@ -137,5 +139,6 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Native call_api rejects test-run creation/control while the route can authorize
-agents. No default native orchestration binding.
+Gaps: No dedicated native orchestration binding; generic REST calls retain
+skills.test policy, task-assignment authorization, responsible-user intersection and
+admitted skill-test JWT scope.

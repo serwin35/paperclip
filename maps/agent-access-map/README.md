@@ -67,3 +67,43 @@ Use `verify-paperclip` and existing API/runner/MCP fixtures to collect the
 permitted-agent and denial evidence; report blocked/not-run coverage honestly.
 Run `node scripts/check-maps.mjs` after editing. The structural check does not
 certify permissions, API catalog coverage, tool admission or live behavior.
+
+## Native REST transport
+
+The `call_api` parity change reconciles affected baselines against
+`58e16dbddfc9c8d0cf60867f9d9847f0feda055b` and the changes in this PR. Ordinary
+REST operations use the same route authorization as legacy agent REST. Dedicated
+tools remain optional for those operations; protocol endpoints still need their
+existing clients. Board-only routes remain restricted for agent identity.
+
+Native `search_api` / `call_api` requires operator rollout admission, a running
+authorized native run, current task assignment and execution-run binding, company
+and budget authority, task privacy, and a permitted work mode. Ask and Plan retain
+mutation restrictions, and runs retain their admitted JWT scope during restart
+recovery even when task mode changes. A waiting
+agent does not gain independent native control just because a REST route exists.
+
+Credential-bearing replies, including company exports and their legacy alias,
+stay inline under a 10 MiB limit and use encrypted mutation receipts. Other saved
+API snapshots are limited to the issuing actor and responsible user, plus authorized
+administrators. Artifact uploads enforce the same access checks as downloads;
+private snapshots are excluded from company exports and public company logos.
+Explicit deliverables use the existing sharing path. Native event history,
+checkpoints and completion records omit API bodies while preserving receipt
+metadata and replay digests. Restored webhook secrets use the same encrypted
+receipt and inline response policy as newly created webhook secrets.
+Task image access requires the company boundary and the task permission;
+skill-test and low-trust agents do not need company-wide browsing authority.
+Completion replay applies the same idempotent projection to stored and expected
+payloads; [the run-log guide](../../doc/run-log-events.md) describes its fields.
+
+Sources: [API client](../../server/src/services/native-runtime/runner-api-client.ts),
+[catalog](../../server/src/services/native-runtime/runner-api-catalog.ts),
+[native authority](../../server/src/services/native-runtime/paperclip-runner-tool-authority.ts),
+[credential storage classification](../../server/src/services/native-runtime/runner-api-sensitive-response.ts),
+[snapshot access](../../server/src/services/asset-content-access.ts),
+and [history redaction](../../server/src/services/native-runtime/runner-api-log-redaction.ts). The affected entries remain
+`baseline` and `source-only`; this reconciliation does not certify every operation.
+Targeted real-route proof lives in the
+[API integration suite](../../server/src/services/native-runtime/runner-api.integration.test.ts),
+including owned routines, skill tests, scoped secrets, proposals and private export replay.

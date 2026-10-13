@@ -91,7 +91,7 @@ export function importedSkill(source: SkillSource, entry: SkillSourceEntry): Com
 export type RepositoryScenario = 'single' | 'multiple' | 'none' | 'empty' | 'partial-error' | 'error' | 'loading';
 
 /** Scoped API fixtures keep the production page interactive without contacting GitHub. */
-export function installFixtures(empty: boolean, needsConnection: boolean, options: { packageScenario?: PackageScenario; journey?: boolean; refreshed?: boolean; assigned?: boolean; repositories?: RepositoryScenario; scan?: "live" | "large" | "interrupted"; saving?: boolean } = {}) {
+export function installFixtures(empty: boolean, needsConnection: boolean, options: { packageScenario?: PackageScenario; journey?: boolean; refreshed?: boolean; assigned?: boolean; repositories?: RepositoryScenario; scan?: "live" | "large" | "interrupted"; saving?: boolean; disconnected?: boolean } = {}) {
   const fixtureController = new AbortController();
   const wait = (ms: number, signal = fixtureController.signal) => new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -284,10 +284,12 @@ export function installFixtures(empty: boolean, needsConnection: boolean, option
     source.lastSuccessAt = new Date();
     return structuredClone({ source, imported: [], updated: [], unchanged: source.entries.filter(entry => entry.selection === "selected").length, warnings: [] });
   };
-  skillSourcesApi.disconnect = async (_companyId, id) => {
+  if (options.disconnected) sources.forEach(source => { source.enabled = false; });
+  skillSourcesApi.disconnect = async (_companyId, id, input) => {
     const source = sources.find(item => item.id === id)!;
-    source.enabled = false;
-    return structuredClone(source);
+    const count = source.entries.filter(entry => entry.skillId).length;
+    sources.splice(sources.findIndex(item => item.id === id), 1);
+    return { id, copiedCount: input.skills === 'copy' ? count : 0, deletedCount: input.skills === 'delete' ? count : 0 };
   };
   return () => {
     fixtureController.abort();

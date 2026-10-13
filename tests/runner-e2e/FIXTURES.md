@@ -111,6 +111,19 @@ registry therefore discovers that row through the public environments API.
 This still provides full isolation because every cell starts a new Paperclip
 instance and database.
 
+
+Native-generation Codex on Daytona qualifies its immutable image through one
+existing saved-environment probe before agent creation. Automatic Codex requests
+also inspect the scoped server discovery default. Legacy and other provider
+fixtures keep their existing setup. The probe uses no provider turn, permits one
+setup lease per cell, has a 330-second HTTP deadline and a 10-second platform
+command budget, and performs no retry. It uses the existing archive/release and
+provider-expiry cleanup policy. The returned owned probe lease joins task leases
+in the existing runtime-cost estimator; unrelated lease IDs do not gain task
+attribution. Failed setup before fixture completion retains unavailable/unknown
+cost coverage and its holds. A connection-only probe or name-only snapshot cannot
+qualify native defaults.
+
 Daytona creates sandbox environments through the public API. The core fixture
 keeps `reuseLease:false` and `runnerLifecycleMode:"per_turn"`. The dedicated
 warm-continuity fixture uses `reuseLease:true` and

@@ -1293,6 +1293,14 @@ describe("company skill mutation permissions", () => {
     }
   });
 
+  it("requires an explicit skill disposition and revision when removing a source", async () => {
+    const app = createApp({ type: "board", userId: "member", companyIds: ["company-1"], source: "session" });
+    const path = "/api/companies/company-1/skill-sources/source-id";
+    for (const body of [{}, { revision: 0 }, { skills: "delete" }, { revision: 0, skills: "ignore" }]) {
+      await request(app).delete(path).send(body).expect(400);
+    }
+  });
+
   it("rejects cross-company source reads and mutations for board users and agents", async () => {
     for (const actor of [
       { type: "board", userId: "member", companyIds: ["company-1"], isInstanceAdmin: true, source: "session" },

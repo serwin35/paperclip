@@ -2,7 +2,9 @@
 
 Product map: [Routines, schedules, and triggers](../feature-map/routines.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -18,8 +20,8 @@ API: `present` — representative operation IDs:
 - `POST /api/companies/{companyId}/routines`.
 - `PATCH /api/routines/{id}`.
 
-Agent access: `partial` — Agent REST / CLI routine create/update; optional installed MCP
-generic request.
+Agent access: `available` — Agent REST / native `call_api` / CLI routine create/update;
+optional installed MCP generic request.
 
 Policy: Agents may read company routines but only create/manage routines assigned to
 themselves; trigger secrets need secure handling.
@@ -32,8 +34,9 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Native call_api rejects routine mutation; manage_routine is scenario-only/unbound.
-Agent REST is implemented.
+Gaps: No dedicated production manage_routine binding; generic `call_api` provides
+the permitted REST path. Creation needs a responsible user resolved from the parent
+issue or company default.
 
 ## `triggers`
 
@@ -44,7 +47,8 @@ API: `present` — representative operation IDs:
 - `POST /api/routines/{id}/triggers`.
 - `PATCH /api/routine-triggers/{id}`.
 
-Agent access: `partial` — Owned-routine agent REST / CLI routine trigger commands.
+Agent access: `available` — Owned-routine agent REST / native `call_api` / CLI trigger
+commands.
 
 Policy: Agents may read company routines but only create/manage routines assigned to
 themselves; trigger secrets need secure handling.
@@ -57,8 +61,9 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: No production default native trigger-management binding. Webhook creation/rotation
-also returns credential material.
+Gaps: No dedicated production trigger-management binding; generic `call_api`
+provides the permitted REST path. Credential replies use inline delivery and encrypted
+mutation receipts rather than shared response assets.
 
 ## `run-now`
 
@@ -68,7 +73,8 @@ API: `present` — representative operation IDs:
 
 - `POST /api/routines/{id}/run`.
 
-Agent access: `partial` — Owned-routine agent REST / CLI routine run.
+Agent access: `partial` — Owned-routine agent REST / CLI run; native `call_api` from
+an authorized active run.
 
 Policy: Agents may read company routines but only create/manage routines assigned to
 themselves; trigger secrets need secure handling.
@@ -81,8 +87,8 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: A scheduled/waiting native agent cannot use call_api for this eligible operation;
-a real control binding is missing.
+Gaps: Scheduled/waiting native agents cannot independently call this operation:
+native authority requires a running bound run. A separate control binding remains absent.
 
 ## `history`
 
@@ -117,8 +123,7 @@ API: `present` — representative operation IDs:
 
 - `PATCH /api/routines/{id}`.
 
-Agent access: `partial` — Owned-routine agent REST / CLI; normal native fallback can
-manage separate folder metadata where permitted.
+Agent access: `available` — Owned-routine agent REST / native `call_api` / CLI.
 
 Policy: Agents may read company routines but only create/manage routines assigned to
 themselves; trigger secrets need secure handling.
@@ -131,5 +136,5 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Pause/archive routine mutation lacks a production native binding. Plugin-managed
-routine rules remain separate.
+Gaps: Pause/archive mutations have a generic native REST path under routine
+ownership rules. Plugin-managed routine rules remain separate.

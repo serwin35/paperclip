@@ -16,15 +16,38 @@ a system warning in the task conversation. It remains local run-log data.
 The hidden native coordinator writes each validated PRP event to the bound
 run's existing event stream before it acknowledges the runner. The row keeps
 the PRP `eventType`, source instance, source event ID, source sequence, protocol
-schema version, and a SHA-256 digest of the canonical source envelope. Its
+schema version, and a SHA-256 digest of the canonical stored envelope. Its
 payload is `{ "prpEvent": <canonical PRP event> }`.
+
+Native API tool events omit HTTP request and response bodies from durable history.
+This includes serialized provider `contentItems`, legacy HTTP receipts and
+`call_api` arguments. Saved receipts retain the operation and call IDs, success
+flag, HTTP status and content type when present. The body becomes
+`***REDACTED***`, with `apiPayloadRedacted: true` and `apiPayloadSha256`, a SHA-256
+digest of the original payload. These digests distinguish duplicate events from
+changed payloads; they cannot recover omitted bodies for debugging or replay.
+The model receives the original authorized response. Credential-bearing mutation
+receipts use encrypted storage separately from this run log.
+
+Checkpoints and completion records apply the same redaction. Completion retries
+compare stored and expected payloads through the control-plane port's idempotent
+`normalizeReplayPayload` projection, so a saved redacted result can be confirmed
+without restoring API bodies. Ports without a projection compare their original
+payloads. Repeated redaction preserves the original digest and detects changed
+private payloads.
+
+The native runtime passes this projection through backend recovery to the Codex
+driver. Recovery compares saved semantic results and turn fingerprints with
+provider history through the same representation. A private body change retains
+its distinct digest and fails recovery; an unchanged body does not require
+restoring its plaintext into the checkpoint.
 
 PostgreSQL JSONB cannot represent NUL (U+0000), which can occur in command
 output such as Vite virtual-module paths. The run-event payload column uses a
 lossless storage codec for these events: the JSONB projection renders NUL as
 the literal `\u0000`, and the reserved `$paperclipRunEventJsonV1` field contains
 the original serialized JSON as a doubly escaped string. Ordinary payloads
-retain their existing representation. Drizzle reads restore the exact original
+retain their existing representation. Drizzle reads restore the exact stored
 payload before replay, hash validation, redaction, or API presentation. SQL
 queries can still inspect ordinary routing fields in the projection; raw SQL
 readers of the whole payload must apply `decodeRunEventPayload`. The column

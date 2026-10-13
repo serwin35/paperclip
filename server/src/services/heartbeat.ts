@@ -2576,7 +2576,7 @@ export function heartbeatService(
       } = await prepareHeartbeatTaskContext(db, {
         run, agent,
         task: { issueRef, issueContext, wakeCommentContext, context, taskSession },
-        policy: { trustPreset, experimentalInstanceSettings },
+        policy: { trustPreset, experimentalInstanceSettings, recovering: Boolean(runOptions.nativeRestartRecovery || runOptions.nativeLeaseOwner) },
         services: { issuesSvc, getPinnedSkillTestContext },
       });
       const sourceWorkspaceConfig = buildExecutionWorkspaceAdapterConfig({

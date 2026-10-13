@@ -129,6 +129,15 @@ the feature map's sections and feature names. Shared fixtures live in
 `ui/storybook/support/`. Keep each suite's explicit meta `id` and catalog `stableId`
 when changing titles or locations so existing review links remain valid.
 
+Storybook's Overview mirrors every feature in the feature-map README, including
+features without examples. Each feature's generated Overview lists its capabilities
+in recipe order, related suites across primary homes, and missing examples.
+`ui/storybook/generated/` holds the derived pages; the preview config's inline
+`storySort.order` is generated too. Regenerate these outputs
+with `node scripts/storybook-catalog.mjs --write`, not manual edits. Storybook
+start/build rejects stale generated output. These guide pages are separate from
+the authored story inventory and do not count as visual or behavioral coverage.
+
 Start from the downstream [Storybook feature index](../maps/storybook-map/INDEX.md)
 to find existing stories by capability. Its [contract](../maps/storybook-map/README.md)
 separates production subjects, prototype implementations, simulated data, and

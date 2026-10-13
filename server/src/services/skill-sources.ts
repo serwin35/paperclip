@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import { folderService } from './folders.js';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
-import { companySkillSources as sources, companySkillSourceEntries as entries, companySkills, companySkillRepositorySnapshots, type Db } from '@paperclipai/db';
-import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest } from '@paperclipai/shared';
+import { companySkillSources as sources, companySkillSourceEntries as entries, companySkills, companySkillRepositorySnapshots, authUsers, type Db } from '@paperclipai/db';
+import type { CompanySkill, SkillSourceDisconnectRequest, SkillSourceDisconnectResult, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest } from '@paperclipai/shared';
 import { normalizeAgentUrlKey } from '@paperclipai/shared';
 import { conflict, notFound, unprocessable } from '../errors.js';
 import { companySkillService, parseSkillImportSourceInput } from './company-skills.js';
@@ -14,7 +16,7 @@ type SourceRow = typeof sources.$inferSelect;
 export type SkillSourceContext = {
   actor: { type: 'user' | 'agent' | 'system'; userId?: string | null; agentId?: string | null };
   read: (connectionId: string | null) => GitHubRead;
-  authorize: (action: 'skills.import' | 'skills.update' | 'skills.edit', resource: { skillId?: string; skillKey?: string; sourceType: 'git'; sourceLocator: string }) => Promise<void>;
+  authorize: (action: 'skills.import' | 'skills.update' | 'skills.edit' | 'skills.remove' | 'skills.create', resource: { skillId?: string; skillKey?: string; sourceType: 'git'; sourceLocator: string }) => Promise<void>;
   audit: (tx: Tx, sourceId: string, action: string, details: Record<string, unknown>) => Promise<void>;
 };
 const scope = (companyId: string, id: string) => and(eq(sources.companyId, companyId), eq(sources.id, id));
@@ -217,21 +219,47 @@ export function skillSourceService(db: Db) {
       throw error;
     }
   }
-  async function disconnect(companyId: string, id: string, context: SkillSourceContext) {
-    const source = await row(companyId, id);
+  async function disconnect(companyId: string, id: string, context: SkillSourceContext, input: SkillSourceDisconnectRequest): Promise<SkillSourceDisconnectResult> {
+    const source = await detail(companyId, id);
+    if (source.revision !== input.revision) throw conflict('This source changed. Reload before disconnecting.');
     await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl });
-    await authorizeSelection(source, [], context);
-    return db.transaction(async tx => {
-      await tx.select().from(sources).where(scope(companyId, id)).for('update');
-      await tx.update(sources).set({ enabled: false, revision: sql`${sources.revision} + 1`, leaseToken: null, leaseExpiresAt: null }).where(scope(companyId, id));
-      for (const entry of (await detail(companyId, id, tx)).entries) {
-        if (!entry.skillId) continue;
-        const skill = await skills.getById(companyId, entry.skillId, tx);
-        if (skill) await tx.update(companySkills).set({ metadata: { ...skill.metadata, skillSourceId: id, skillSourceState: 'not_syncing' } }).where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skill.id)));
-      }
-      await context.audit(tx, id, 'company.skill_source_disconnected', {});
-      return detail(companyId, id, tx);
-    });
+    const skillIds = [...new Set(source.entries.flatMap(entry => entry.skillId ? [entry.skillId] : []))];
+    for (const skillId of skillIds) {
+      const skill = await skills.getById(companyId, skillId);
+      if (!skill) continue;
+      const resource = { sourceType: 'git' as const, sourceLocator: source.repositoryUrl, skillId, skillKey: skill.key };
+      await context.authorize(input.skills === 'delete' ? 'skills.remove' : 'skills.edit', resource);
+      if (input.skills === 'copy') await context.authorize('skills.create', resource);
+    }
+    async function lock(tx: Tx) {
+      const [locked] = await tx.select().from(sources).where(scope(companyId, id)).for('update');
+      if (!locked || locked.revision !== input.revision) throw conflict('This source changed. Reload before disconnecting.');
+    }
+    async function remove(tx: Tx, copiedCount: number, deletedCount: number) {
+      await tx.delete(sources).where(scope(companyId, id));
+      await context.audit(tx, id, 'company.skill_source_disconnected', { skills: input.skills, skillIds, copiedCount, deletedCount });
+    }
+    if (input.skills === 'delete') {
+      const deleted = await skills.deleteSkills(companyId, skillIds, (tx, deleted) => remove(tx, 0, deleted.length), lock);
+      return { id, copiedCount: 0, deletedCount: deleted.length };
+    }
+    let folderId: string | null = null;
+    if (skillIds.length && context.actor.type === 'user' && context.actor.userId) {
+      const [user] = await db.select({ name: authUsers.name }).from(authUsers).where(eq(authUsers.id, context.actor.userId));
+      folderId = (await folderService(db).ensureMyFolder(companyId, context.actor.userId, user?.name ?? null)).id;
+    }
+    const directories: string[] = [];
+    try {
+      return await db.transaction(async tx => {
+        await lock(tx);
+        for (const skillId of skillIds) await skills.makeImportedSkillEditable(companyId, skillId, context.actor, folderId, tx, directories);
+        await remove(tx, skillIds.length, 0);
+        return { id, copiedCount: skillIds.length, deletedCount: 0 };
+      });
+    } catch (error) {
+      await Promise.all(directories.map(directory => fs.rm(directory, { recursive: true, force: true })));
+      throw error;
+    }
   }
   async function importFromUrl(companyId: string, input: string, context: SkillSourceContext) {
     const parsed = parseSkillImportSourceInput(input);

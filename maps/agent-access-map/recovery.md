@@ -2,7 +2,9 @@
 
 Product map: [Recovery](../feature-map/recovery.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -42,7 +44,8 @@ API: `present` — representative operation IDs:
 
 - `POST /api/issues/{id}/recovery-actions/resolve`.
 
-Agent access: `partial` — Eligible agent REST / CLI; native generic mutation restricted.
+Agent access: `partial` — Eligible agent REST / native `call_api` / CLI under
+source-bound recovery authority.
 
 Policy: Task/run visibility, run ownership and source/action policy; workspace export
 retry and some operator controls require board.
@@ -55,8 +58,9 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Underlying route has agent checks; no corresponding default native recovery
-mutation tool is advertised.
+Gaps: Eligible resolutions use native `call_api`. The route retains owner and
+management authority, active-run/source-trust checks, board-only outcomes and
+reconciliation controls.
 
 ## `source-action`
 
@@ -67,7 +71,8 @@ API: `present` — representative operation IDs:
 - `GET /api/issues/{id}/recovery-actions`.
 - `POST /api/issues/{id}/recovery-actions/resolve`.
 
-Agent access: `partial` — Eligible agent REST / CLI; source-bound recovery state.
+Agent access: `partial` — Eligible agent REST / native `call_api` / CLI; source-bound
+recovery state.
 
 Policy: Task/run visibility, run ownership and source/action policy; workspace export
 retry and some operator controls require board. Completion or cancellation of a
@@ -89,8 +94,8 @@ physical copyback, and cleanup after the receipt is cleared. Exercise this
 sequence in a disposable instance; automatic cleanup must use the system actor
 and must not create reader participation. No live recovery proof is claimed.
 
-Gaps: Need operation-level eligibility and a real native binding for permitted recovery
-actions; do not route around lifecycle authority.
+Gaps: Permitted resolutions use native `call_api` under existing eligibility
+and ownership checks. Source/action policy determines whether continuation is allowed.
 
 ## `exhaustion`
 
@@ -139,8 +144,8 @@ Verification: `not-run` — assert the documented agent denial with an owned tes
 verify any listed agent request/result path separately. A delegated operation needs its
 own policy and access review.
 
-Gaps: Export retry/reconciliation APIs exist but require board. Native generic
-execution-control mutations are also blocked.
+Gaps: Export retry and branch reconciliation require board runtime:manage at
+their HTTP routes. Native `call_api` preserves these denials.
 
 ## `unknown-outcome`
 

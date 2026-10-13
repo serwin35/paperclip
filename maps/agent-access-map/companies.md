@@ -2,7 +2,9 @@
 
 Product map: [Companies and portability](../feature-map/companies.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -97,8 +99,8 @@ API: `present` — representative operation IDs:
 - `POST /api/companies/{companyId}/imports/preview`.
 - `POST /api/companies/{companyId}/imports/apply`.
 
-Agent access: `partial` — CEO REST / CLI company; native export restricted, eligible
-same-company import uses fallback.
+Agent access: `partial` — Same-company CEO REST / native `call_api` / CLI exports
+and eligible same-company imports.
 
 Policy: Same-company CEO or board for identity/import operations; list/create/archive
 convenience endpoint is board-gated.
@@ -111,5 +113,5 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Secure exports lack a default native binding; new-company/ZIP import flows have
-different board and transport constraints.
+Gaps: Exports use inline credential delivery and encrypted mutation receipts.
+New-company/ZIP import flows retain their board and transport constraints.

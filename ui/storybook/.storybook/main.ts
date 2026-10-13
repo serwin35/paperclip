@@ -16,7 +16,7 @@ const paperclipInstanceOrigin = (() => {
 })();
 
 const config: StorybookConfig = {
-  stories: ["../stories/**/*.stories.@(ts|tsx|mdx)"],
+  stories: ["../stories/**/*.stories.@(ts|tsx|mdx)", "../generated/features/*.stories.tsx"],
   staticDirs: ["../../public", "../public"],
   addons: ["@storybook/addon-docs", "@storybook/addon-a11y"],
   framework: {

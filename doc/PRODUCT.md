@@ -85,7 +85,11 @@ skills through their existing GitHub connection and manually refresh installed
 snapshots. The source records repository, branch, path, and installed commit;
 the connection supplies caller-authorized access. Originals remain viewable and
 testable, with independent editable copies. New upstream skills require selection,
-and deselection, source disconnection, or upstream removal retains installed content.
+and deselection or upstream removal retains installed content. Disconnecting removes
+the source after an explicit choice: keep independent editable copies in My Skills,
+or delete its imported skills. Copies preserve agent assignments; skills still
+used by agents must be detached before deletion. Already-disconnected sources
+can be removed through the same flow.
 
 An explicit restricted policy may deny selected operations or switch to a default-deny preset with explicit allow rules. Core exposes a stable versioned policy API so EE and other administrative clients configure and simulate the same evaluator used by skill mutation routes. Core Skill Studio only needs to perform normal skill work, explain an explicit denial, and point administrators to EE when its richer policy UI is available; it must not recreate a partial enterprise permission editor.
 

@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { companies, companySkills, companySkillVersions, companySkillRepositorySnapshots, createDb } from '@paperclipai/db';
+import { agents, folders, companySkillSources, companies, companySkills, companySkillVersions, companySkillRepositorySnapshots, createDb } from '@paperclipai/db';
 import { eq, sql } from 'drizzle-orm';
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from './helpers/embedded-postgres.js';
 import { unprocessable } from '../errors.js';
@@ -81,8 +81,9 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
       expect((await promisify(execFile)(path.join(staged.source, 'scripts/run.sh'))).stdout.trim()).toBe('hello');
     } finally { fetchSpy.mockRestore(); }
     await expect(sources.refresh(companyId, result.source.id, context, { revision: 0, selectedPaths: [], excludedFolders: [] })).rejects.toThrow(/changed/);
-    const disconnected = await sources.disconnect(companyId, result.source.id, context);
-    expect(disconnected.enabled).toBe(false);
+    const disconnected = await sources.disconnect(companyId, result.source.id, context, { revision: (await sources.detail(companyId, result.source.id)).revision, skills: 'copy' });
+    expect(disconnected.copiedCount).toBe(2);
+    await expect(sources.detail(companyId, result.source.id)).rejects.toThrow(/not found/);
     expect(await skills.getById(companyId, skill.id)).not.toBeNull();
     await expect(sources.detail(randomUUID(), result.source.id)).rejects.toThrow(/not found/);
   });
@@ -186,10 +187,35 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     const provider = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('Existing reference'));
     try { expect((await skills.readFile(legacyCompany, legacy!.id, 'reference.md'))?.content).toBe('Existing reference'); }
     finally { provider.mockRestore(); }
+    const revision = (await service.detail(legacyCompany, adopted[0]!.id)).revision;
+    await expect(service.disconnect(legacyCompany, adopted[0]!.id, context, { revision, skills: 'copy' })).rejects.toThrow(/saved files are incomplete.*Refresh the source/);
+    expect((await skills.getById(legacyCompany, legacy!.id))?.sourceType).toBe('github');
+    expect((await service.detail(legacyCompany, adopted[0]!.id)).revision).toBe(revision);
+    await db.update(companySkills).set({ currentVersionId: null }).where(eq(companySkills.id, legacy!.id));
+    await expect(service.disconnect(legacyCompany, adopted[0]!.id, context, { revision, skills: 'copy' })).rejects.toThrow(/saved files are incomplete/);
+    await db.update(companySkills).set({ currentVersionId: partial!.id }).where(eq(companySkills.id, legacy!.id));
     files = { 'legacy/SKILL.md': md('updated name') };
     const refreshed = await service.refresh(legacyCompany, adopted[0]!.id, context);
     expect(refreshed.updated[0]).toMatchObject({ id: legacy!.id, key: legacy!.key, slug: legacy!.slug });
     expect((await db.select().from(companySkills).where(eq(companySkills.companyId, legacyCompany))).filter(skill => skill.key === legacy!.key)).toHaveLength(1);
+  });
+
+  it('does not report a copy when an imported skill is deleted before publication', async () => {
+    files = { 'SKILL.md': md('copy-race') }; commit = sha;
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'copy-race', commitSha: sha, selectedPaths: ['SKILL.md'] }, context);
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const pending = service.disconnect(companyId, created.source.id, { ...context, authorize: async action => {
+      if (action === 'skills.create') { entered(); await blocked; }
+    } }, { revision: created.source.revision, skills: 'copy' });
+    await started;
+    await skills.deleteSkill(companyId, created.imported[0]!.id);
+    release();
+    await expect(pending).rejects.toThrow(/imported skill changed/);
+    expect((await service.detail(companyId, created.source.id)).id).toBe(created.source.id);
+    expect(await skills.getById(companyId, created.imported[0]!.id)).toBeNull();
   });
 
   it('resolves legacy commit-only imports to the default branch without duplicating skills', async () => {
@@ -409,6 +435,112 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     await deleteCompany(db, temporaryCompany);
     expect(await db.select().from(companySkillRepositorySnapshots).where(eq(companySkillRepositorySnapshots.companyId, temporaryCompany))).toHaveLength(0);
     expect(await db.select().from(companySkillVersions).where(eq(companySkillVersions.companyId, temporaryCompany))).toHaveLength(0);
+  });
+
+  async function removalFixture(mode: 'skills' | 'repository' = 'repository') {
+    files = { 'one/SKILL.md': md('one') + '\nRead [reference](reference.md)', 'one/reference.md': 'Local reference',
+      'two/SKILL.md': md('two'), 'shared/check.sh': '#!/bin/sh\necho preserved',
+      'shared/image.png': Buffer.from([0, 255, 137, 80]) };
+    commit = sha;
+    return skillSourceService(db).create(companyId, { repositoryUrl: 'https://github.com/acme/skills',
+      trackingRef: `remove-${randomUUID()}`, packageMode: mode, commitSha: sha, selectedPaths: ['one/SKILL.md', 'two/SKILL.md'] }, context);
+  }
+
+  it('removes legacy disconnected sources and all linked imports, including deselected skills, and allows re-import', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await removalFixture('skills');
+    const changed = await service.refresh(companyId, created.source.id, context, {
+      revision: created.source.revision, selectedPaths: ['one/SKILL.md'], excludedFolders: [] });
+    await db.update(companySkillSources).set({ enabled: false }).where(eq(companySkillSources.id, created.source.id));
+    const audit = vi.fn();
+    const result = await service.disconnect(companyId, created.source.id, { ...context, audit }, { revision: changed.source.revision, skills: 'delete' });
+    expect(result).toMatchObject({ deletedCount: 2, copiedCount: 0 });
+    await expect(service.detail(companyId, created.source.id)).rejects.toThrow(/not found/);
+    for (const skill of created.imported) expect(await skills.getById(companyId, skill.id)).toBeNull();
+    expect(audit).toHaveBeenCalledWith(expect.anything(), created.source.id, 'company.skill_source_disconnected', expect.objectContaining({ deletedCount: 2 }));
+    const reimported = await service.create(companyId, { repositoryUrl: created.source.repositoryUrl, trackingRef: created.source.trackingRef,
+      commitSha: sha, selectedPaths: ['one/SKILL.md'] }, context);
+    expect(reimported.imported).toHaveLength(1);
+    expect(reimported.imported[0]!.id).not.toBe(created.imported[0]!.id);
+  });
+
+  it('keeps complete editable personal copies and assigned identities without requiring GitHub', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await removalFixture();
+    const original = created.imported[0]!;
+    const [agent] = await db.insert(agents).values({ companyId, name: 'Copy user', role: 'engineer',
+      adapterType: 'codex_local', adapterConfig: { paperclipSkillSync: { desiredSkills: [{ key: original.key }] } } }).returning();
+    const result = await service.disconnect(companyId, created.source.id, { ...context, read: () => { throw new Error('GitHub unavailable'); } }, { revision: created.source.revision, skills: 'copy' });
+    expect(result).toMatchObject({ copiedCount: 2, deletedCount: 0 });
+    await expect(service.detail(companyId, created.source.id)).rejects.toThrow(/not found/);
+    const copy = (await skills.detail(companyId, original.id))!;
+    expect(copy).toMatchObject({ id: original.id, key: original.key, sourceType: 'local_path', sourceRef: null, editable: true });
+    expect(copy.metadata?.skillSourceId).toBeUndefined();
+    expect((await skills.readFile(companyId, original.id, '.paperclip-repository/one/reference.md'))?.content).toBe('Local reference');
+    const [personal] = await db.select().from(folders).where(eq(folders.id, copy.folderId!));
+    expect(personal?.systemKey).toBe('my:board');
+    expect((await skills.readFile(companyId, original.id, '.paperclip-repository/shared/image.png'))?.content).toBe(Buffer.from([0,255,137,80]).toString('base64'));
+    const script = await skills.readFile(companyId, original.id, '.paperclip-repository/shared/check.sh');
+    expect(script).toMatchObject({ content: '#!/bin/sh\necho preserved', executable: true });
+    await skills.updateFile(companyId, original.id, '.paperclip-repository/shared/check.sh', '#!/bin/sh\necho edited', context.actor);
+    expect((await skills.readFile(companyId, original.id, '.paperclip-repository/shared/check.sh'))?.content).toBe('#!/bin/sh\necho edited');
+    expect((await db.select().from(agents).where(eq(agents.id, agent!.id)))[0]?.adapterConfig).toEqual(agent!.adapterConfig);
+    await db.delete(agents).where(eq(agents.id, agent!.id));
+  });
+
+  it('does not partly delete a source when an imported skill is assigned to an agent', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await removalFixture();
+    const [agent] = await db.insert(agents).values({ companyId, name: 'Needs this skill', role: 'engineer', adapterType: 'codex_local',
+      adapterConfig: { paperclipSkillSync: { desiredSkills: [{ key: created.imported[1]!.key }] } } }).returning();
+    try {
+      await expect(service.disconnect(companyId, created.source.id, context, { revision: created.source.revision, skills: 'delete' })).rejects.toThrow(/Needs this skill/);
+      expect((await service.detail(companyId, created.source.id)).enabled).toBe(true);
+      for (const skill of created.imported) expect(await skills.getById(companyId, skill.id)).not.toBeNull();
+    } finally { await db.delete(agents).where(eq(agents.id, agent!.id)); }
+  });
+
+  it('rejects stale revisions, other-company targets, and removal denied for a deselected skill', async () => {
+    const service = skillSourceService(db);
+    const created = await removalFixture();
+    const changed = await service.refresh(companyId, created.source.id, context, { revision: created.source.revision, selectedPaths: ['one/SKILL.md'], excludedFolders: [] });
+    await expect(service.disconnect(companyId, created.source.id, context, { revision: created.source.revision, skills: 'delete' })).rejects.toThrow(/changed/);
+    await expect(service.disconnect(randomUUID(), created.source.id, context, { revision: changed.source.revision, skills: 'delete' })).rejects.toThrow(/not found/);
+    const excluded = changed.source.entries.find(entry => entry.selection === 'excluded')!;
+    await expect(service.disconnect(companyId, created.source.id, { ...context, authorize: async (action, resource) => {
+      if (action === 'skills.remove' && resource.skillId === excluded.skillId) throw new Error('Protected skill');
+    } }, { revision: changed.source.revision, skills: 'delete' })).rejects.toThrow('Protected skill');
+    expect((await service.detail(companyId, created.source.id)).entries.filter(entry => entry.skillId)).toHaveLength(2);
+  });
+
+  it.each(['copy', 'delete'] as const)('rolls back source and skill changes when %s activity persistence fails', async choice => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await removalFixture();
+    await expect(service.disconnect(companyId, created.source.id, { ...context, audit: async () => { throw new Error('Audit unavailable'); } },
+      { revision: created.source.revision, skills: choice })).rejects.toThrow('Audit unavailable');
+    expect((await service.detail(companyId, created.source.id)).revision).toBe(created.source.revision);
+    for (const skill of created.imported) {
+      expect(await skills.getById(companyId, skill.id)).toMatchObject({ sourceType: 'github', currentVersionId: skill.currentVersionId });
+      expect(await skills.readFile(companyId, skill.id, '.paperclip-repository/shared/image.png')).not.toBeNull();
+    }
+  });
+
+  it('removes a source while its refresh is in flight without resurrecting imports', async () => {
+    const service = skillSourceService(db), skills = companySkillService(db);
+    const created = await removalFixture();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const reader = context.read(null);
+    const refreshing = service.refresh(companyId, created.source.id, { ...context, read: () => Object.assign(async (request: string) => {
+      entered(); await blocked; return reader(request);
+    }, { openSnapshot: reader.openSnapshot }) }).then(() => null, error => error);
+    await started;
+    await service.disconnect(companyId, created.source.id, context, { revision: created.source.revision, skills: 'delete' });
+    release();
+    expect(await refreshing).toBeInstanceOf(Error);
+    await expect(service.detail(companyId, created.source.id)).rejects.toThrow(/not found/);
+    for (const skill of created.imported) expect(await skills.getById(companyId, skill.id)).toBeNull();
   });
 
 });

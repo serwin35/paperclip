@@ -7159,45 +7159,87 @@ export function companySkillService(db: Db) {
     return { pruned: rows.length };
   }
 
-  async function deleteSkill(companyId: string, skillId: string): Promise<CompanySkill | null> {
-    const initial = await getById(companyId, skillId);
-    if (!initial) return null;
+  async function makeImportedSkillEditable(
+    companyId: string, skillId: string, actor: SkillActor, folderId: string | null,
+    database: DbOrTransaction, createdDirectories: string[],
+  ) {
+    const [locked] = await database.select({ id: companySkills.id }).from(companySkills)
+      .where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skillId))).for("update");
+    if (!locked) throw conflict("An imported skill changed. Reload before disconnecting.");
+    const skill = (await getById(companyId, skillId, database))!;
+    const version = await getCurrentVersion(skill);
+    const recovery = `Cannot keep "${skill.name}" because its saved files are incomplete. Refresh the source before keeping editable copies, or choose Delete skills.`;
+    if (!version) throw unprocessable(recovery);
+    const files = await runtimeVersionInventory(companyId, version);
+    const savedPaths = new Set(files.map(file => file.path));
+    const savedSkillPath = (relativePath: string) => version.repositorySnapshotId && version.repositorySkillPath
+      ? `${REPOSITORY_CONTENT_DIR}/${path.posix.join(path.posix.dirname(version.repositorySkillPath), relativePath)}`
+      : relativePath;
+    if (!savedPaths.has("SKILL.md") || skill.fileInventory.some(file => !savedPaths.has(savedSkillPath(file.path)))) {
+      throw unprocessable(recovery);
+    }
+    const managedRoot = resolveManagedSkillsRoot(companyId);
+    await fs.mkdir(managedRoot, { recursive: true });
+    const directory = await fs.mkdtemp(path.join(managedRoot, `${skill.slug}-copy-`));
+    createdDirectories.push(directory);
+    for (const file of files) {
+      assertSkillSnapshotPath(file.path);
+      const target = path.join(directory, file.path);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, skillFileBytes(file), { mode: file.executable ? 0o755 : 0o644 });
+    }
+    const updated = await database.update(companySkills).set({
+      sourceType: "local_path", sourceLocator: directory, sourceRef: null, folderId,
+      fileInventory: files.map(({ path, kind }) => ({ path, kind })),
+      metadata: {
+        sourceKind: "managed_local",
+        copiedFromRepository: { url: skill.sourceLocator, ref: skill.sourceRef, path: skill.metadata?.skillSourcePath },
+        forkedByUserId: actor.type === "user" ? actor.userId ?? null : null,
+        forkedByAgentId: actor.type === "agent" ? actor.agentId ?? null : null,
+      },
+      updatedAt: new Date(),
+    }).where(and(eq(companySkills.companyId, companyId), eq(companySkills.id, skillId))).returning({ id: companySkills.id });
+    if (updated.length !== 1) throw conflict("An imported skill changed. Reload before disconnecting.");
+  }
+
+  async function deleteSkills(
+    companyId: string, skillIds: string[],
+    onDelete?: (tx: DbTransaction, deleted: CompanySkill[]) => Promise<void>,
+    beforeDelete?: (tx: DbTransaction) => Promise<void>,
+  ): Promise<CompanySkill[]> {
+    const initial = (await Promise.all([...new Set(skillIds)].sort().map(id => getById(companyId, id))))
+      .filter((skill): skill is CompanySkill => Boolean(skill));
     async function assertUnused(skill: CompanySkill) {
       const usedByAgents = await usage(companyId, skill.key);
       if (usedByAgents.length === 0) return;
-      const agentNames = usedByAgents.map((agent) => agent.name).sort((left, right) => left.localeCompare(right));
       throw unprocessable(
-        `Cannot delete skill "${skill.name}" while it is still used by ${agentNames.join(", ")}. Detach it from those agents first.`,
-        {
-          skillId: skill.id, skillKey: skill.key,
-          usedByAgents: usedByAgents.map((agent) => ({
-            id: agent.id, name: agent.name, urlKey: agent.urlKey, adapterType: agent.adapterType,
-          })),
-        },
+        `Cannot delete skill "${skill.name}" while it is still used by ${usedByAgents.map(agent => agent.name).sort().join(", ")}. Detach it from those agents first.`,
+        { skillId: skill.id, skillKey: skill.key, usedByAgents: usedByAgents.map(({ id, name, urlKey, adapterType }) => ({ id, name, urlKey, adapterType })) },
       );
     }
-    await assertUnused(initial);
+    for (const skill of initial) await assertUnused(skill);
     const managedRoot = resolveManagedSkillsRoot(companyId);
-    let movedSource: { source: string; quarantine: string } | undefined;
-    let deleted: CompanySkill | null = null;
-    async function restoreSource() {
-      if (!movedSource) return;
-      await fs.rename(movedSource.quarantine, movedSource.source);
-      movedSource = undefined;
+    const moved: Array<{ source: string; quarantine: string }> = [];
+    async function restoreSources() {
+      for (const item of moved.reverse()) await fs.rename(item.quarantine, item.source);
+      moved.length = 0;
     }
-    // Keep the cache lifecycle lock through database commit. A publisher must
-    // not see the old row after cache removal and republish a deleted skill.
-    await removeRuntimeSkillCache(managedRoot, initial.id, async () => {
+    async function withCacheLocks(index: number): Promise<CompanySkill[]> {
+      if (index < initial.length) {
+        let result: CompanySkill[] = [];
+        await removeRuntimeSkillCache(managedRoot, initial[index]!.id, async () => { result = await withCacheLocks(index + 1); });
+        return result;
+      }
       try {
-        deleted = await db.transaction(async (tx) => {
-          // Share creation's name lock and re-read the ID, so a second delete
-          // cannot remove a newly recreated skill with the same name.
-          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${companyId}:${initial.slug}`}, 0))`);
-          const skill = await getById(companyId, skillId, tx);
-          if (!skill) return null;
-          if (skill.slug !== initial.slug) throw conflict("Skill changed during deletion. Retry the request.");
-          await assertUnused(skill);
-          try {
+        return await db.transaction(async tx => {
+          await beforeDelete?.(tx);
+          const deleted: CompanySkill[] = [];
+          for (const before of initial) {
+            await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`${companyId}:${before.slug}`}, 0))`);
+            const skill = await getById(companyId, before.id, tx);
+            if (!skill) continue;
+            if (skill.slug !== before.slug) throw conflict("Skill changed during deletion. Retry the request.");
+            await assertUnused(skill);
             await fs.rm(resolveRuntimeSkillMaterializedPath(companyId, skill), { recursive: true, force: true });
             if (isPaperclipManagedRenameTarget(skill)) {
               const source = normalizeSkillDirectory(skill)!;
@@ -7209,33 +7251,34 @@ export function companySkillService(db: Db) {
                 const quarantineRoot = path.join(managedRoot, ".deleted");
                 await fs.mkdir(quarantineRoot, { recursive: true });
                 const quarantine = path.join(quarantineRoot, `${skill.id}-${randomUUID()}`);
-                // Do not follow symlinks or delete external/project sources.
-                // Retain bytes until the database deletion commits.
                 await fs.rename(source, quarantine);
-                movedSource = { source, quarantine };
+                moved.push({ source, quarantine });
               }
             }
-            await tx.delete(companySkills).where(and(eq(companySkills.id, skillId), eq(companySkills.companyId, companyId)));
-          } catch (error) {
-            // Restore before releasing the name lock on a failed write.
-            await restoreSource();
-            throw error;
+            await tx.delete(companySkills).where(and(eq(companySkills.id, skill.id), eq(companySkills.companyId, companyId)));
+            deleted.push(skill);
           }
-          return skill;
+          await onDelete?.(tx, deleted);
+          return deleted;
         });
       } catch (error) {
-        await restoreSource();
+        await restoreSources();
         throw error;
       }
-    });
-    // Only remove the unique quarantine path after commit. Cleanup must not
-    // remove a replacement skill or report a committed delete as failed.
-    if (movedSource) {
-      await fs.rm(movedSource.quarantine, { recursive: true, force: true }).catch((error) => {
-        logger.warn({ err: error, companyId, skillId }, "Skill deleted; quarantined source cleanup failed");
+    }
+    let deleted: CompanySkill[];
+    try { deleted = await withCacheLocks(0); }
+    catch (error) { await restoreSources(); throw error; }
+    for (const item of moved) {
+      await fs.rm(item.quarantine, { recursive: true, force: true }).catch(error => {
+        logger.warn({ err: error, companyId }, "Skill deleted; quarantined source cleanup failed");
       });
     }
     return deleted;
+  }
+
+  async function deleteSkill(companyId: string, skillId: string): Promise<CompanySkill | null> {
+    return (await deleteSkills(companyId, [skillId]))[0] ?? null;
   }
 
   return {
@@ -7277,6 +7320,8 @@ export function companySkillService(db: Db) {
     deleteFile,
     createLocalSkill,
     deleteSkill,
+    deleteSkills,
+    makeImportedSkillEditable,
     listTestInputs,
     createTestInput,
     updateTestInput,

@@ -136,6 +136,39 @@ sample of interactions and rendering, not execution of all 2,210 stories.
 The fixture-server story and visual-baseline comparisons remain untested for the
 reasons below. The owned static preview was left running for the requested test-drive.
 
+## Complete feature index follow-up — 2026-10-12
+
+Source baseline: `88bf4c6c1d222f818faa56257efe79207c892a6c` (merged PR #16049).
+Storybook now derives all eight sections, 35 feature families, and 171 capabilities
+from the feature map. Each feature has a generated Overview, including the seven
+without primary suites. Related example links cross primary homes without copying
+stories. Generated guides are separate from the authored catalog and example counts.
+The upstream feature map remains unchanged. Deeper authored scenario groups remain
+intact; this pass does not establish new production parity.
+
+The built index preserved all 2,210 existing story IDs and the docs ID, adding only
+35 feature overviews in map order. Catalog/generator tests (16), token gates, map
+checks, both skill validators, workspace typecheck, workspace build, and Storybook
+build passed. The UI project passed 8,170 tests in 728 files. The broad local test
+run encountered a failure in the unchanged GitHub chat case `authorizes description
+edits as the editor, never inheriting the original author's access`; that exact
+case passed alone without changing code or expectations. A complete local repository
+suite pass is not established. PR #16052 records the final CI result separately.
+
+The local built Storybook passed browser checks for the complete index/sidebar,
+capability-ID search, empty search, Goals cross-feature suite links, all five
+Execution environments capability gaps, and the existing Questions suite links.
+The original `composer-question-flow--editable-initial-text` bookmark still renders.
+The CLI feature uses a comma in its sidebar label because Storybook treats `/` as
+a folder separator; its guide heading retains the upstream name.
+
+Review fixes retain matching shared foundations during search and validate review
+fingerprints after generated files are written. Searching `Primitive Matrix` shows
+and opens the existing foundation story. A regression test changes a capability
+description and proves regeneration reports the resulting review drift without
+updating fingerprints. These checks establish navigation and generation behavior,
+not production acceptance or visual-baseline comparison.
+
 ## Remaining review work
 
 1. Review the 188 unreviewed suites by capability and production subject. Compare
@@ -158,6 +191,33 @@ reasons below. The owned static preview was left running for the requested test-
 Use `maintain-storybook` to correct drift and `review-storybook` to record separate
 source, render, interaction, visual-comparison, and production evidence. Both skills
 consume the feature map; neither changes its upstream contract.
+
+## Native runtime prerequisite: scoped source follow-up — 2026-10-12
+
+Source comparison: `9f59ff36cf2da963709ca19c06ab005510c835a6` against actual
+master `4b958ecbd8f33a7782fe6f29ec825f80f636b833`. The reviewed
+`maps/feature-map/runs-adapters.md` bytes have SHA-256
+`ca5aff86608b7d7987dc0ee814475a7b93e3faff1f99ce090429d2e932b7e16b`.
+
+Twenty-one entries in Runs, harnesses, and model accounts and Task creation and
+lifecycle had review-fingerprint drift. Their 117 unique declared sources have
+one changed input: the runs-adapters feature recipe. All 21 story files and the
+other 116 declared production subjects, wrappers and fixture sources are
+unchanged from master. The recipe adds bounded native startup and registration
+retirement controls. It separates those provider-free controls from real daemon
+and installed-provider proof; it changes no represented UI or fixture contract.
+
+Refreshed only those 21 reviewed fingerprints. No story, fixture, export, stable
+ID, title, capability reference or product/implementation/data classification
+changed. Existing mixed and unreviewed parity limitations remain. No fixture
+correction is needed for this scoped prerequisite; this does not establish full
+state parity for the affected suites.
+
+This follow-up is source inspection only. Rendering, play assertions, visual
+comparisons and production provider acceptance were not run. Native lifecycle
+behavior remains with the linked transport controls and their existing hosted
+CI fixtures. Catalog validation proves structure and reviewed dependency hashes,
+not that these live journeys passed.
 
 ## Task workspace reconciliation — 2026-10-12
 
@@ -213,3 +273,81 @@ Reviewed the same twelve workspace-recipe-dependent entries after extending the 
 ## Default-source recipe follow-up — 2026-10-13
 
 Reviewed the twelve unchanged workspace recipe subjects and fixtures after correcting implicit default selection. Task creation and controller classification now share configured-policy, primary, creation-time and ID precedence. Explicit choices and retained denial markers still suppress controller hooks. Project strategy fixtures show configuration, while runtime status and file/browser/artifact/service fixtures do not execute source scripts or prove this backend ordering. Refreshed only their reviewed recipe fingerprints and retained all classifications and stable IDs. No browser render, play, screenshot, Storybook build or live runtime acceptance was performed.
+
+
+## Inherited activity, inbox and recovery recipes — 2026-10-12
+
+Source comparison: master `e168512f7bdbb6af6ea01954c6d7ed80b91e903e`
+against previous master `f329b24ee12496e710ad17377ec7716e0eee22ef`,
+while reconciling the native-runtime prerequisite. All 25 affected catalog
+entries are identical to e168 master; their stale fingerprints were inherited.
+
+The 101 unique declared inputs have three changed feature recipes. The remaining 98 inputs, including all 25 story files, are unchanged
+between those masters and the merged worktree. They include 92 non-map
+story, subject, wrapper and fixture sources and six unchanged map files. The reviewed recipe
+bytes have these SHA-256 identities:
+
+- `maps/feature-map/activity.md`: `3867cc392c031cc5ca9ec61bfc4211d685da37e39fb36e9b152497b7cf970caf`.
+- `maps/feature-map/inbox-search.md`: `8ff5431ddfe54c0c288eecffb785f864d8bfeb38be50c66615999ffbbfba6863`.
+- `maps/feature-map/recovery.md`: `46fee5940f23a6d1483697e0b07817a78d993d4748b51121d2e113dd2a96173b`.
+
+The activity addition names issue-scoped activity authorization and sandbox
+bridge controls; company audit/display fixtures do not establish live sandbox
+agent access. The inbox recipe excludes automatic historical read cleanup from
+user participation while retaining explicit decisions; static inbox/decision
+examples do not execute that query or the newly required user/company journey.
+The recovery recipe retains native workspace-owner holds across task completion
+and repeated reads until exact operator retirement; recovery display fixtures
+do not establish ownership, copyback denial, action identity or live operator
+recovery. These backend acceptance requirements remain separate gaps.
+
+The proposed maintenance changes only those 25 reviewed dependency fingerprints.
+Retain the existing 24 unreviewed and one current classification, simulation
+boundaries, story exports, titles and stable IDs. No fixture or story correction
+is indicated by this declared-source comparison. This does not promote full
+state parity or coverage for the added backend requirements.
+
+Source inspection only: no browser rendering, play, visual baseline, provider
+run or live production acceptance was performed for this reconciliation. The
+existing catalog checker must run on the actual merged tree after synchronization;
+its result verifies structure and declared hashes, not these live journeys.
+
+## 2026-10-13 master merge reconciliation
+
+Reviewed the source delta from `4808adc34e` to merge `63b2e7b8ad`
+(master parent `d67e3507b2`). The text conflict in INDEX retained the feature-map
+ordering and upstream workspace review notes. Regenerated INDEX after reviewing
+61 stale catalog entries against the changed declared sources.
+
+The inspected changes add assignment-history recipient suggestions and preserve
+manual selections, expand backend verification recipes, and add channel task
+defaults and access avatars with matching fixture changes. Entries record those
+limits. The sidebar suite that also mounts IssueDetail is now unreviewed because
+its route fixture has not been exercised against the new activity query. Existing
+composer examples omit the new optional suggested-assignee prop and retain their
+previous scenarios; their classifications do not certify the new behavior.
+
+All 223 authored suites and 2,210 authored story IDs remain. Generated feature
+pages still cover 35 areas and 171 capabilities. Catalog/generator tests (16),
+catalog validation, map checks and token gates pass. This is source reconciliation,
+not a new visual or live production acceptance claim.
+
+## Slack DM mention exemption — 2026-10-13
+
+Scoped source review: Slack DMs no longer require an at-mention, while channel
+messages and channel thread replies retain the saved mention policy. Top-level
+DM replies remain linear. The production `ChatEndpointDetail` settings copy and
+the feature-map manual recipe now state this distinction.
+
+The Chat management story mounts that production settings page and merges
+endpoint PATCH values in its local fixture. GitHub bot management and Photon
+also reference the page, but do not render its Slack-only toggle. No story UI,
+fixture behavior, or story identity changed, and no browser proof is claimed.
+
+After rebasing onto master `60bc0d5fee`, the upstream catalog reconciliation
+supplies the reviewed baseline for the previously stale entries. Refreshed the
+fourteen entries affected by this change: all reference the updated chat recipe,
+and three also reference the Slack-only settings copy. Other source bytes and
+all classifications, fixture boundaries, story IDs and sidebar titles remain
+unchanged from that baseline. Catalog checks validate these references and
+fingerprints, not live Slack behavior.

@@ -17,8 +17,8 @@ maintainer; this catalog does not redefine product behavior or permissions.
 
 ## Catalog contract
 
-`catalog.json` is the maintained inventory, with one entry per story file.
-`INDEX.md` is generated from it and the installed Storybook CSF parser. Titles,
+`catalog.json` is the maintained inventory, with one entry per authored story file.
+`INDEX.md` is generated from it, the upstream feature map, and the installed Storybook CSF parser. Titles,
 export filtering, story counts and IDs come from source, not filename guesses.
 All examples are retained, including historical suites. A file's first capability
 is its primary home; remaining capabilities are lookup references, not copies.
@@ -35,7 +35,21 @@ fixture modules and assets live in `ui/storybook/support/`; production wrappers 
 The sidebar follows the section and feature names in the feature-map README, then
 retains each suite's useful scenario grouping. Foundations contains shared component
 examples with no primary product capability. Overview contains the catalog guide.
-Areas with no stories do not get empty sidebar folders.
+Every indexed feature has an Overview page, even when it has no cataloged examples.
+The main guide and these pages use the same section, feature, and capability order
+as the upstream map. Related suite links cross primary homes without copying stories.
+Sidebar labels replace `/` with `, ` because Storybook treats slashes as folders;
+the index and page heading retain the original feature name.
+Missing examples are explicit; historical examples and guides do not imply current
+behavioral coverage.
+
+`ui/storybook/generated/` contains the derived index and one CSF Overview per
+feature. The inline `storySort.order` in the preview config is also generated:
+Storybook's indexer requires a literal there. Regenerate these outputs with the catalog command; do not edit
+them or add them to the authored inventory. Their stable IDs use
+`feature-map-<area>--overview`. Generated pages are explanatory guides and do not
+increase example-suite counts. Storybook start/build checks this output for drift.
+The generator fails on unexpected files rather than silently deleting them.
 
 Each suite declares an explicit CSF `id`, recorded as `stableId` in the catalog.
 The `sidebarTitle` can change without changing that identity. Existing story and
@@ -76,14 +90,17 @@ After installing workspace dependencies:
 ```sh
 node scripts/storybook-catalog.mjs
 node scripts/storybook-catalog.mjs --write
-node --test scripts/storybook-catalog.test.mjs
+node --test scripts/storybook-catalog.test.mjs scripts/storybook-feature-index.test.mjs
 ```
 
 The checker rejects unaccounted or deleted stories, invalid capability references,
 duplicate entries/IDs, missing review sources, changed fingerprints and a stale
-generated index. `--write` only regenerates the index; it never refreshes review
+generated indexes and feature pages. `--write` only regenerates these outputs; it never refreshes review
 fingerprints or blesses drift. Preserve IDs when changing titles or moving files;
 compare the existing built Storybook index before and after such changes.
+Feature outputs are regenerated before fingerprints are checked. If those writes
+change a review source, the command fails with the affected review entries. Inspect
+the generated change before updating those fingerprints and rerunning the command.
 
 Use the existing [Storybook workflow](../../doc/DEVELOPING.md#storybook) for builds,
 browser review, and visual tests. Report source inspection, rendering, `play`

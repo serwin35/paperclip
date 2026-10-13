@@ -38,6 +38,33 @@ Automated: [environment UI](../../ui/src/pages/CompanyEnvironments.test.tsx), [d
 
 Manual: Save a disposable target, reload it, and run its available probe. Verify both success and missing-credential/reachability errors identify the target. Confirm unavailable providers are not offered as working run targets.
 
+For an immutable sandbox image, pin the OCI image with `@sha256` and explicitly
+probe the saved environment in the intended company. The existing connection
+probe allocates a fresh lease and can measure its OS, architecture and libc.
+Qualification is recorded only when the selected image/configuration matches
+the live lease and cleanup is confirmed. Inspect `platformQualificationRecorded`
+and its diagnostic in the probe result: connection success alone does not mean
+the image has native runtime qualification.
+
+The measured record is server-owned, company-bound and tied to the effective
+configuration and active custom-image identity. Mutable tags, provider defaults
+and name-only snapshots do not qualify. Changing the target or image invalidates
+the record; normal metadata edits cannot forge or overwrite it, and API reads
+omit the private metadata. Reading this evidence for discovery or creation does
+not allocate a sandbox. The draft `probe-config` checks are not a saved-image
+qualification operation. See the [runtime contract](../../packages/paperclip-runner/README.md)
+and [adapter validation recipe](./runs-adapters.md#adapter-setup) for native
+binary/provider readiness after platform qualification.
+
+Verification recipe: probe a pinned owned image, record its company/config/image
+identity and cleanup result, then change the image or target and verify its old
+qualification is not reused. A mutable-image connection can succeed while
+qualification remains absent. Assert ordinary agent and non-admin board probe
+requests are denied, and environment create/PATCH payloads cannot supply
+qualification metadata.
+This recipe and its [probe controls](../../server/src/__tests__/environment-probe.test.ts)
+are not claims that a live provider or agent-access journey ran for this map update.
+
 The local row has no UI Test button. Its API/CLI probe reports host/cwd
 availability only; it does not validate an adapter binary, workspace, or task
 execution. Remote-driver probes and a real bounded run need their own evidence.
@@ -51,5 +78,7 @@ Manual: Run a bounded command in the intended target, inspect its output and wor
 ## Gotchas
 
 - A probe is narrower evidence than a complete task with tools, files, and resumption.
+- Platform qualification does not authenticate a model account or qualify every
+  harness; the selected native runtime still needs its own setup and useful-task proof.
 - The local option may appear only when editing an existing local environment; availability follows current UI/provider capabilities.
 - Workspace service reachability and environment reachability are separate checks.

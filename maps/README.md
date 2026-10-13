@@ -90,14 +90,15 @@ Review: `operation-reviewed`.
 ### `create`
 
 API: `present` — POST /api/companies/{companyId}/routines.
-Agent access: `partial` — agent REST and CLI routine create; default native
-mutation binding missing, and call_api blocks routine mutations.
+Agent access: `available` — agent REST, CLI routine create and native call_api
+under the enabled rollout and active-run/mode gates.
 Policy: same company; assigneeAgentId must be the calling agent; cite the
 routine authorization and native API policy sources.
 Evidence: `source-only` — reviewed commit and source links; no live proof.
 Verification: `not-run` — create an owned routine; reject assignment to another
 agent; inspect saved configuration, attribution and retry behavior.
-Gaps: default native create path; verify using the real permitted agent context.
+Gaps: verify ownership and responsible-user resolution with a permitted agent
+context; source presence alone does not qualify this operation.
 ```
 
 ## Keeping the maps synchronized

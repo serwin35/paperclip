@@ -141,3 +141,13 @@ export interface SkillSourceRefreshResult {
   unchanged: number;
   warnings: string[];
 }
+
+export interface SkillSourceDisconnectRequest {
+  revision: number;
+  skills: 'copy' | 'delete';
+}
+export interface SkillSourceDisconnectResult {
+  id: string;
+  copiedCount: number;
+  deletedCount: number;
+}

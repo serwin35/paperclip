@@ -631,6 +631,9 @@ describe("sandbox managed runtime", () => {
     const localAssetsDir = path.join(rootDir, "local-assets");
     const linkedAssetPath = path.join(rootDir, "linked-skill.md");
     await mkdir(path.join(localWorkspaceDir, ".claude"), { recursive: true });
+    const cloneStaging = path.join(".paperclip-runtime", "repository-staging", "pending.clone-abc", "partial.txt");
+    await mkdir(path.dirname(path.join(localWorkspaceDir, cloneStaging)), { recursive: true });
+    await writeFile(path.join(localWorkspaceDir, cloneStaging), "Incomplete private clone");
     await mkdir(localAssetsDir, { recursive: true });
     await writeFile(path.join(localWorkspaceDir, "README.md"), "local workspace\n", "utf8");
     await writeFile(path.join(localWorkspaceDir, "._README.md"), "appledouble\n", "utf8");
@@ -664,6 +667,7 @@ describe("sandbox managed runtime", () => {
       },
     };
     const runtimeStatuses: string[] = [];
+    const run = vi.spyOn(client, "run");
 
     attachFallbackSyncIn(client);
     const prepared = await prepareSandboxManagedRuntime({
@@ -691,6 +695,7 @@ describe("sandbox managed runtime", () => {
     });
 
     await expect(readFile(path.join(remoteWorkspaceDir, "README.md"), "utf8")).resolves.toBe("local workspace\n");
+    await expect(readFile(path.join(remoteWorkspaceDir, cloneStaging), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(remoteWorkspaceDir, "._README.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(remoteWorkspaceDir, ".claude", "settings.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(prepared.assetDirs.skills, "skill.md"), "utf8")).resolves.toBe("skill body\n");
@@ -719,7 +724,9 @@ describe("sandbox managed runtime", () => {
       expect.stringMatching(/^config_sync:Syncing skills to environment: 100% \(\d+\.\d\/\d+\.\d MB\)$/),
       expect.stringMatching(/^restore:Restoring workspace from environment: 100% \(\d+\.\d\/\d+\.\d MB\)$/),
     ]));
+    await expect(readFile(path.join(localWorkspaceDir, cloneStaging), "utf8")).resolves.toBe("Incomplete private clone");
     expect(runtimeStatuses.at(-1)).toBe("finalize:Finalizing workspace");
+    expect(run.mock.calls.some(([command]) => command.includes("workspace-download.tar"))).toBe(true);
   });
 
   it("falls back to the host-known byte count when the provider reports 0 for inbound workspace sync", async () => {
@@ -1057,6 +1064,7 @@ describe("sandbox managed runtime", () => {
     await expect(readFile(path.join(localWorkspaceDir, "deleted.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(localWorkspaceDir, "node_modules", "cache.bin"), "utf8")).resolves.toBe("do not upload\n");
 
+    expect(runtimeStatuses.at(-1)?.phase).toBe("finalize");
     expect(downloadedTars).toHaveLength(1);
     const downloadMembers = await listTarMembers(rootDir, "workspace-download-list.tar", downloadedTars[0]!.bytes);
     expect(downloadMembers.some((entry) => entry === ".git" || entry.startsWith(".git/"))).toBe(false);
@@ -4094,6 +4102,26 @@ describe("sandbox managed runtime outbound coordinator", () => {
     expect(diagnostics.join("")).not.toContain("private");
     expect(getWorkspaceRestoreDiagnostic(workspaceError)).toEqual({ phase: "workspace", step: "workspace_transfer", errorCode: "EACCES" });
     expect(control.settled).toEqual(expect.arrayContaining(["workspace", "home", "private-asset"]));
+  });
+
+  it("restores non-git workspace bytes through native syncOut without a fallback tar", async () => {
+    const { workspaceDir, remoteWorkspaceDir } = await makeOutboundDirs([]);
+    const client = makeGatedOutboundClient(false, async (_label, run) => run());
+    const syncOut = vi.spyOn(client, "syncOut");
+    const run = vi.spyOn(client, "run");
+    const prepared = await prepareSandboxManagedRuntime({
+      spec: makeSpec(remoteWorkspaceDir), adapterKey: "test-adapter", client, workspaceLocalDir: workspaceDir,
+    });
+    await writeFile(path.join(remoteWorkspaceDir, "file.txt"), "updated native bytes\n", "utf8");
+    await writeFile(path.join(remoteWorkspaceDir, "remote-only.txt"), "native sync\n", "utf8");
+    await prepared.restoreWorkspace();
+    expect(syncOut).toHaveBeenCalledTimes(1);
+    expect(syncOut.mock.calls[0]?.[0].flatMap((operation) => operation.files)).toEqual([
+      expect.objectContaining({ kind: "directory", sourcePath: remoteWorkspaceDir }),
+    ]);
+    await expect(readFile(path.join(workspaceDir, "file.txt"), "utf8")).resolves.toBe("updated native bytes\n");
+    await expect(readFile(path.join(workspaceDir, "remote-only.txt"), "utf8")).resolves.toBe("native sync\n");
+    expect(run.mock.calls.some(([command]) => command.includes("workspace-download.tar"))).toBe(false);
   });
 
   it("with concurrency permitted, an asset restore starts while the workspace restore is held open", async () => {

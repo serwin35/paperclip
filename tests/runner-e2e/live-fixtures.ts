@@ -123,7 +123,7 @@ export async function setupLiveFixtures(input: {
             "../../packages/plugins/sandbox-providers/daytona",
           ),
           isLocalPath: true,
-        });
+        }, { timeout: 120_000 });
       },
       async teardown() {
         // The plugin is installed only in the isolated instance/database. The
@@ -142,7 +142,7 @@ export async function setupLiveFixtures(input: {
         budgetMonthlyCents: ["native-completion", "native-instruction-consolidation", "native-connection-guidance"].includes(execution.suite.id)
           || (execution.suite.id === "everyday-workflows" && ["hire-reuse", "delegate-feedback"].includes(execution.task.id)) ? NATIVE_COMPLETION_BUDGET_CENTS
           : execution.suite.id === "task-titles" ? TASK_TITLE_BUDGET_CENTS
-          : execution.suite.id === "stock-harness" ? 1_000 : 0,
+          : ["stock-harness", "task-workspaces"].includes(execution.suite.id) ? 1_000 : 0,
       });
     },
     async teardown() {

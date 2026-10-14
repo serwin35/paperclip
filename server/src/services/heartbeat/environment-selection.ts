@@ -64,7 +64,7 @@ export interface HeartbeatEnvironmentSelectionInput {
     issueAssigneeOverrides: { adapterConfig: Record<string, unknown> | null } | null;
   };
   services: {
-    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getById" | "validateSelection">;
+    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getStoredById" | "validateSelection">;
     environmentsSvc: Pick<ReturnType<typeof environmentService>,
       "ensureLocalEnvironment" | "findManagedSandboxEnvironment" | "findKubernetesEnvironment" | "ensureKubernetesEnvironment" | "getById">;
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "get" | "getExperimental">;
@@ -105,7 +105,7 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
     persistedNativeExecutionWorkspaceId ??
     readNonEmptyString(issueRef?.executionWorkspaceId);
   const existingExecutionWorkspace = requestedExecutionWorkspaceId
-    ? await executionWorkspacesSvc.getById(requestedExecutionWorkspaceId)
+    ? await executionWorkspacesSvc.getStoredById(agent.companyId, requestedExecutionWorkspaceId)
     : null;
   const nativeRecoveryExecutionWorkspaceId =
     resolveNativeRecoveryExecutionWorkspaceBinding({
@@ -414,7 +414,8 @@ export async function selectHeartbeatEnvironment(db: Db, input: HeartbeatEnviron
   if (taskWorkspaceIntent && !boundSourceWorkspace && !nativeRecoveryExecutionWorkspaceId) {
     await executionWorkspacesSvc.validateSelection({ companyId: agent.companyId,
       actor: { type: "agent", agentId: agent.id, companyId: agent.companyId, runId: run.id, source: "agent_jwt", onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId },
-      selection: taskWorkspaceIntent.selection, issueId });
+      selection: taskWorkspaceIntent.selection, issueId,
+      preserveImplicitDefaultSettings: ["project", "task_default"].includes(taskWorkspaceIntent.source) });
   }
   const explicitTaskDirectory = taskWorkspaceIntent?.selection.kind === "task_directory";
   const useIsolatedTaskDirectory = issueRef !== null && shouldUseIsolatedTaskDirectory({

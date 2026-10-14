@@ -4,6 +4,9 @@ import type { StorybookConfig } from "@storybook/react-vite";
 import tailwindcss from "@tailwindcss/vite";
 import { mergeConfig } from "vite";
 import { storybookAgentAvatarAssets } from "../../../scripts/storybook-agent-avatar-assets.mjs";
+import { generateStorybook } from "../../../scripts/storybook-catalog.mjs";
+
+generateStorybook();
 
 const storybookConfigDir = path.dirname(fileURLToPath(import.meta.url));
 const paperclipInstanceOrigin = (() => {

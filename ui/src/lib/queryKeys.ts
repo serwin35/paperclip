@@ -1,5 +1,6 @@
 export const queryKeys = {
   skillSources: {
+    projects: (companyId: string) => ['project-skill-repositories', companyId] as const,
     preview: (companyId: string, repositoryUrl: string, connectionId: string | null, commitSha: string | null, skillPath: string, filePath: string) => ['skill-sources', companyId, 'preview', repositoryUrl, connectionId, commitSha, skillPath, filePath] as const,
     all: (companyId: string) => ["skill-sources", companyId] as const,
     repositories: (companyId: string) => ["skill-source-repositories", companyId] as const,
@@ -745,5 +746,7 @@ export const queryKeys = {
   },
   adapters: {
     all: ["adapters"] as const,
+    availability: (companyId: string | null, environmentId?: string | null) =>
+      ["adapters", "availability", companyId, environmentId ?? null] as const,
   },
 };

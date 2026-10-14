@@ -186,8 +186,8 @@ incomplete coverage.
 
 For Paperclip-assigned work, attach important proof through
 [the artifact workflow](../../../doc/AGENT-ARTIFACTS.md). Keep runtime results in
-the evidence directory or issue, not in the map; `coverage.json` describes
-documentation coverage rather than live test health.
+the evidence directory or issue, not in the map. The generated
+`maps/generated/coverage.json` lists page references, not live test health.
 
 ## Cleanup
 

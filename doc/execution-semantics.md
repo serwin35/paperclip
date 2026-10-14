@@ -1025,6 +1025,14 @@ In the normal non-terminal case, critical silence remains a UI signal and does n
 
 Source-resolved watchdog folding concerns stale active-run bookkeeping after a valid terminal disposition. It does not infer productivity from run counts, comment frequency, or elapsed task time.
 
+Terminal task activity does not prove that the execution runtime has finished.
+The scan leaves native runs with their native lifecycle owner. An active managed
+environment lease, running or failed workspace finalization, or recorded
+copy-back failure also prevents folding. These obligations are checked before
+local process cleanup and again when the run is committed. The owning runtime
+or its bounded recovery saves the files and settles the run; the watchdog does
+not replace that work with a successful result or release its execution locks.
+
 Detached process cleanup is operational hygiene, not source issue liveness. Cleanup should be best-effort and auditable. If cleanup fails but the source issue is already terminal with same-run durable evidence, Paperclip should preserve the cleanup failure on the run/watchdog audit trail and route only the cleanup concern to bounded recovery when a real owner/action remains.
 
 ## 13. Auto-Recover vs Explicit Recovery vs Human Escalation
@@ -1619,6 +1627,13 @@ its scoped access binding. The qualified ACPX sidecar receives the gateway name,
 URL, and token together through the launch allowlist; unrelated environment
 secrets remain excluded. This does not restrict arbitrary network access to a
 public service outside the gateway.
+
+Tool discovery collapses identical descriptors with the same gateway name for
+every provider. Native assigned-tool projection applies the same rule at startup
+and during fresh discovery. A name with conflicting schemas, risk, or source
+bindings remains an error; distinct names retain separate tools. Discovery does
+not grant execution authority: calls still use the existing gateway policy,
+approval, revocation, and audit paths.
 
 
 ### Use real connection requests (2026-09-14)

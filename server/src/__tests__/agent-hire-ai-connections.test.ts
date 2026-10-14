@@ -229,6 +229,31 @@ describe("agent-created hires use managed AI connections", () => {
     expect(saved.runtimeConfig.aiConnection).toEqual(p.binding);
   });
 
+  it.each([
+    ["the stored binding is sent back", true],
+    ["the binding is omitted", false],
+  ])("saves runtime settings without retesting an unchanged AI connection when %s", async (_case, sendBinding) => {
+    const f = await fixture("anthropic", "subscription");
+    await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user", principalId: f.userId, permissionKey: "agents:configure" });
+    const original = getServerAdapter(f.adapterType);
+    const testEnvironment = vi.fn(async () => ({
+      adapterType: f.adapterType, status: "fail" as const, testedAt: new Date().toISOString(),
+      checks: [{ code: "claude_hello_probe_auth_required", level: "error" as const, message: "The account needs sign-in." }],
+    }));
+    registerServerAdapter({ ...original, testEnvironment });
+    try {
+      // Postgres jsonb stores object keys in its own order, not in the binding schema's order.
+      const [stored] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+      const heartbeat = { maxConcurrentRuns: 3 };
+      const runtimeConfig = sendBinding ? { ...stored.runtimeConfig, heartbeat } : { heartbeat };
+      const response = await request(f.app).patch(`/api/agents/${f.agentId}`).send({ runtimeConfig });
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      expect(testEnvironment).not.toHaveBeenCalled();
+      const [saved] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+      expect(saved.runtimeConfig).toEqual({ aiConnection: f.binding, heartbeat });
+    } finally { unregisterServerAdapter(f.adapterType); }
+  });
+
   for (const operation of ["test", "save"] as const) {
     it.each([401, 403, 429, 503, null])(`${operation} changes API-key health only for a provider rejection (status: %s)`, async (status) => {
       const f = await fixture("anthropic", "api_key");

@@ -35,6 +35,10 @@ own policy and access review.
 Gaps: Provider installation and account enrollment are not available to an ordinary
 agent actor.
 
+Speko UI reconciliation (2026-10-13): experimental voice setup uses the same
+board-managed endpoint boundary. Source review follows the merged voice runtime
+and the UI integration; live provider qualification is still separate.
+
 ## `identity`
 
 Review: `baseline`.
@@ -82,6 +86,26 @@ remaining operations before qualifying the whole capability.
 
 Gaps: Normal agent replies work through server delivery. Explicit endpoint publication
 APIs are board management paths.
+
+GitHub publication recovery (2026-10-14): assigned-agent `submit_review`, `comment`,
+and `update_comment` calls reuse their run-, task-, endpoint-, and argument-bound
+publication on an exact retry. Fresh gateway policy and provider authority remain
+required. The durable worker resumes transient failures after restart and stops
+at its retry cap, revoked authority, or a superseded head. A pending receipt is
+not task completion. Source:
+[publication service](../../server/src/services/chat-github-reviews.ts) and
+[gateway](../../server/src/services/tool-gateway.ts). Verification uses
+PostgreSQL-backed provider fixtures; this entry does not claim live provider
+qualification for the new retry path.
+
+Speko browser sessions use `POST /api/companies/{companyId}/voice-sessions`,
+with GET inspection/notification and POST `/{sessionId}/end` operations below
+that collection. These routes require board identity; ordinary agent credentials
+cannot start a private voice session. Start and notification also require the
+experimental chat-connectors gate. Signed provider callbacks use the separate
+voice-webhook routes and their session capability. Evidence: `source-only` —
+[voice routes](../../server/src/routes/voice-sessions.ts). No live browser answer
+retrieval or telephone playback is established by the UI fixtures.
 
 Slack's **Require at-mention** policy applies to channel messages and channel
 thread replies, including queued work. DMs are exempt from mention checks;
@@ -152,3 +176,12 @@ to reply.
 Endpoint/destination execution defaults use the same board-only management
 boundary. Agents select an authorized workspace for their current task through
 the [workspace APIs](workspaces.md), rather than editing channel configuration.
+
+Speko callback preferences, incoming phone configuration/approval, and call
+history use the company-scoped `voice-callbacks`, `voice-phone`, and
+`voice-history` routes. Their UI controls do not grant agents board authority.
+See [voice routes](../../server/src/routes/voice-sessions.ts); service-level
+caller/session permissions and real provider delivery need separate verification.
+
+GitHub review summary headings use the bot display name. Checks remain
+independently scoped by GitHub App and endpoint/PR/commit identity.

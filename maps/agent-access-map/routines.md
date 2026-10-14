@@ -65,6 +65,14 @@ Gaps: No dedicated production trigger-management binding; generic `call_api`
 provides the permitted REST path. Credential replies use inline delivery and encrypted
 mutation receipts rather than shared response assets.
 
+The host-only `GET /api/instance/task-drain?idleSleepSafety=1&scheduledWake=1`
+extension reports the earliest supported future routine deadline under an owned
+idle hold. It requires signed Cloud control authority; company agents and tenant
+admin tokens cannot use it. It does not grant routine management or execution
+authority. See the [hosting protocol](../../doc/idle-sleep-safety.md#scheduled-routine-wake-protocol)
+and [route authorization tests](../../server/src/__tests__/instance-settings-routes.test.ts).
+These are local contract checks, not a live provider sleep/wake qualification.
+
 ## `run-now`
 
 Review: `baseline`.
@@ -138,3 +146,9 @@ remaining operations before qualifying the whole capability.
 
 Gaps: Pause/archive mutations have a generic native REST path under routine
 ownership rules. Plugin-managed routine rules remain separate.
+
+Execution resolves referenced project skills against agent/responsible-user access,
+then saves immutable version selections in the heartbeat execution context. New runs
+resolve latest installed content; resumed runs retain selections and recheck access.
+An unavailable explicit reference produces an actionable configuration error.
+Live agent execution across an upstream update remains required acceptance evidence.

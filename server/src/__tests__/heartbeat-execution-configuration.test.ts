@@ -1,9 +1,14 @@
-import { randomUUID } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
+import { createHash, randomUUID } from "node:crypto";
+import { trace } from "@opentelemetry/api";
+import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
+import { access, readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, companyMemberships, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySkills, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { companySkillService } from "../services/company-skills.js";
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { HttpError } from "../errors.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -37,10 +42,14 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
   const captured = new Map<string, AdapterExecutionContext>();
   const inspect = new Map<string, (input: AdapterExecutionContext) => Promise<void>>();
   const adapterType = "codex_local";
+  const oldHome = process.env.PAPERCLIP_HOME;
+  let home: string;
 
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase("heartbeat-execution-config-");
     db = createDb(temporary.connectionString);
+    home = await mkdtemp(path.join(tmpdir(), "paperclip-execution-skills-"));
+    process.env.PAPERCLIP_HOME = home;
     heartbeat = heartbeatService(db);
     // Exercise real preparation for a managed-capable adapter without calling a provider.
     registerServerAdapter({
@@ -60,6 +69,8 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     unregisterServerAdapter(adapterType);
     await db?.$client.end({ timeout: 0 });
     await temporary?.cleanup();
+    if (oldHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = oldHome;
+    if (home) await rm(home, { recursive: true, force: true });
   });
 
   async function seed(managed = false) {
@@ -112,14 +123,36 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
       expect(JSON.parse(await readFile(path.join(providerHome, "auth.json"), "utf8"))).toEqual({ OPENAI_API_KEY: f.credential });
       await input.onMeta?.({ adapterType, command: "fixture", env, prompt: "fixture" });
     });
-    const { finished, input } = await execute(f);
-    expect(finished.status, finished.error ?? undefined).toBe("succeeded");
-    expect(input?.context.aiConnection).toMatchObject({ accountName: "Fixture account", provider: "openai" });
-    expect(providerHome).toEqual(expect.any(String));
-    await expect(access(providerHome!)).rejects.toMatchObject({ code: "ENOENT" });
-    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, finished.id));
-    expect(events.some(event => event.eventType === "adapter.invoke")).toBe(true);
-    expect(JSON.stringify(events)).not.toContain(f.credential);
+    const exporter = new InMemorySpanExporter();
+    const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+    expect(trace.setGlobalTracerProvider(provider)).toBe(true);
+    try {
+      const { finished, input } = await execute(f);
+      expect(finished.status, finished.error ?? undefined).toBe("succeeded");
+      expect(input?.context.aiConnection).toMatchObject({ accountName: "Fixture account", provider: "openai" });
+      expect(providerHome).toEqual(expect.any(String));
+      await expect(access(providerHome!)).rejects.toMatchObject({ code: "ENOENT" });
+      const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, finished.id));
+      expect(events.some(event => event.eventType === "adapter.invoke")).toBe(true);
+      expect(JSON.stringify(events)).not.toContain(f.credential);
+      await provider.forceFlush();
+      const runIdHash = createHash("sha256").update(finished.id).digest("hex").slice(0, 12);
+      const steps = exporter.getFinishedSpans().filter(span => span.name.startsWith("heartbeat.prepare.configuration_")
+        && span.attributes["paperclip.task.run.run_id"] === runIdHash);
+      expect(steps.map(span => span.name)).toEqual([
+        "configuration_mentions", "configuration_github_identity", "configuration_secrets", "configuration_ai_runtime",
+        "configuration_skills", "configuration_connector_assignments", "configuration_connector_skills",
+        "configuration_connector_delivery", "configuration_connection_instructions", "configuration_agent_identity",
+      ].map(step => `heartbeat.prepare.${step}`));
+      for (const span of steps) {
+        expect(span.status).toEqual({ code: 0 });
+        expect(span.attributes).toEqual({ "paperclip.task.run.run_id": runIdHash });
+        expect(span.events).toEqual([]);
+      }
+    } finally {
+      trace.disable();
+      await provider.shutdown();
+    }
   });
 
   it("cleans acquired credentials and redacts diagnostics when later skill preparation fails", async () => {
@@ -134,18 +167,36 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
       await access(acquiredHome!);
       return runtime;
     });
-    const { finished, input } = await execute(f);
-    expect(finished.status).toBe("failed");
-    expect(input).toBeUndefined();
-    expect(acquiredHome).toEqual(expect.any(String));
-    await expect(access(acquiredHome!)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(finished.error).toContain("Invalid fixture skill configuration");
-    // The diagnostic reporter redacts runtime values before the external sink.
-    // The legacy local run.error field does not apply this value-based redaction.
-    await waitForPendingRunFailureReports();
-    expect(capturedFailure).toHaveBeenCalled();
-    expect(JSON.stringify(capturedFailure.mock.calls)).toContain("Invalid fixture skill configuration");
-    expect(JSON.stringify(capturedFailure.mock.calls)).not.toContain(f.credential);
+    const exporter = new InMemorySpanExporter();
+    const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+    expect(trace.setGlobalTracerProvider(provider)).toBe(true);
+    try {
+      const { finished, input } = await execute(f);
+      expect(finished.status).toBe("failed");
+      expect(input).toBeUndefined();
+      expect(acquiredHome).toEqual(expect.any(String));
+      await expect(access(acquiredHome!)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(finished.error).toContain("Invalid fixture skill configuration");
+      await waitForPendingRunFailureReports();
+      expect(capturedFailure).toHaveBeenCalled();
+      expect(JSON.stringify(capturedFailure.mock.calls)).toContain("Invalid fixture skill configuration");
+      expect(JSON.stringify(capturedFailure.mock.calls)).not.toContain(f.credential);
+      await provider.forceFlush();
+      const runIdHash = createHash("sha256").update(finished.id).digest("hex").slice(0, 12);
+      const steps = exporter.getFinishedSpans().filter(span => span.name.startsWith("heartbeat.prepare.configuration_")
+        && span.attributes["paperclip.task.run.run_id"] === runIdHash);
+      expect(steps.find(span => span.name === "heartbeat.prepare.configuration_ai_runtime")?.status.code).toBe(0);
+      expect(steps.find(span => span.name === "heartbeat.prepare.configuration_skills")?.status).toEqual({ code: 2 });
+      expect(steps.some(span => span.name === "heartbeat.prepare.configuration_connector_assignments")).toBe(false);
+      for (const span of steps) {
+        expect(span.attributes).toEqual({ "paperclip.task.run.run_id": runIdHash });
+        expect(span.events).toEqual([]);
+      }
+      expect(JSON.stringify(steps.map(span => ({ name: span.name, status: span.status, attributes: span.attributes, events: span.events })))).not.toContain(f.credential);
+    } finally {
+      trace.disable();
+      await provider.shutdown();
+    }
   });
 
   it("defers a busy account without dispatch and preserves its scheduled retry", async () => {
@@ -157,4 +208,40 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId));
     expect(runs.filter(run => run.id !== finished.id)).toEqual([expect.objectContaining({ status: "scheduled_retry", scheduledRetryReason: "ai_connection_busy" })]);
   });
+
+  it("snapshots only selected immutable skills and omits inaccessible optional assignments", async () => {
+    const f = await seed();
+    const skills = companySkillService(db);
+    const selected = await skills.createLocalSkill(f.companyId, { name: "Selected workflow", markdown: "# Selected\nUse the original workflow.\n" });
+    const unused = await skills.createLocalSkill(f.companyId, { name: "Unused workflow" });
+    const restricted = await skills.createLocalSkill(f.companyId, { name: "Restricted workflow" });
+    await db.update(companySkills).set({ accessSourceId: randomUUID() }).where(eq(companySkills.id, restricted.id));
+    await db.update(agents).set({ adapterConfig: { paperclipSkillSync: { desiredSkills: [restricted.key] } } }).where(eq(agents.id, f.agentId));
+    await db.update(issues).set({ description: "Use [/selected](skill://" + selected.id + "?s=selected-workflow)." }).where(eq(issues.id, f.issueId));
+    const { finished, input } = await execute(f);
+    expect(finished.status, finished.error ?? undefined).toBe("succeeded");
+    const inventory = input?.config.paperclipRuntimeSkills as Array<{ key: string; source: string; versionId: string }>;
+    expect(inventory.some(entry => entry.key === unused.key || entry.key === restricted.key)).toBe(false);
+    const delivered = inventory.find(entry => entry.key === selected.key)!;
+    expect(delivered.versionId).toBe(selected.currentVersionId);
+    expect(delivered.source).toContain(selected.currentVersionId!);
+    expect(await readFile(path.join(delivered.source, "SKILL.md"), "utf8")).toContain("Use the original workflow.");
+    expect(finished.contextSnapshot).toMatchObject({ skillSelectionSnapshot: true, skillVersions: { [selected.key]: selected.currentVersionId } });
+    expect(Object.keys(finished.contextSnapshot!.skillVersions as object)).not.toContain(unused.key);
+    expect(Object.keys(finished.contextSnapshot!.skillVersions as object)).not.toContain(restricted.key);
+  });
+
+  it("rejects an inaccessible explicit skill reference before adapter dispatch", async () => {
+    const f = await seed();
+    const skill = await companySkillService(db).createLocalSkill(f.companyId, { name: "Private reference" });
+    await db.update(companySkills).set({ accessSourceId: randomUUID() }).where(eq(companySkills.id, skill.id));
+    await db.update(issues).set({ description: "Use [/private](skill://" + skill.id + "?s=private-reference)." }).where(eq(issues.id, f.issueId));
+    const { finished, input } = await execute(f);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toContain("referenced skill is unavailable");
+    expect(input).toBeUndefined();
+  });
 });
+
+
+enableRunFailureReporting();

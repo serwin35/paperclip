@@ -1,4 +1,8 @@
-# Local, SSH, and sandbox environments
+---
+navigation: {"section":"Projects and execution","sectionOrder":40,"order":40}
+---
+
+# Execution environments
 
 Operators configure where agents execute, probe readiness, select an environment for work, and inspect remote provisioning or custom-image state when the installed provider supports it.
 
@@ -82,3 +86,33 @@ Manual: Run a bounded command in the intended target, inspect its output and wor
   harness; the selected native runtime still needs its own setup and useful-task proof.
 - The local option may appear only when editing an existing local environment; availability follows current UI/provider capabilities.
 - Workspace service reachability and environment reachability are separate checks.
+
+### Storybook verification
+
+#### `configuration`
+
+Scope: ui
+Storybook: Local/SSH/sandbox editors; unavailable providers, missing credentials, save pending/error and restricted operator.
+Production: Persist target configuration and enforce instance-admin/local-operator mutation boundary; target catalog is instance-scoped.
+Sources: Source: [CompanyEnvironments.tsx](../../ui/src/pages/CompanyEnvironments.tsx), [environments.ts](../../server/src/routes/environments.ts). Tests: [CompanyEnvironments.test.tsx](../../ui/src/pages/CompanyEnvironments.test.tsx), [environment-service.test.ts](../../server/src/__tests__/environment-service.test.ts)
+
+#### `capabilities`
+
+Scope: ui
+Storybook: Supported versus unavailable driver/provider controls and interactive-setup/template-capture limitations.
+Production: Verify advertised driver/plugin capabilities match operations; unavailable provider cannot become working target; capability discovery must not allocate sandbox.
+Sources: Source: [CompanyEnvironments.tsx](../../ui/src/pages/CompanyEnvironments.tsx), [environments.ts](../../ui/src/api/environments.ts). Tests: [environment-capability-contract.test.ts](../../server/src/__tests__/environment-capability-contract.test.ts), [environment-execution-target-capabilities.test.ts](../../server/src/__tests__/environment-execution-target-capabilities.test.ts), [plugin-environment-driver-sandbox-capabilities.test.ts](../../server/src/__tests__/plugin-environment-driver-sandbox-capabilities.test.ts)
+
+#### `probe`
+
+Scope: ui
+Storybook: Remote Test pending, success, reachability/auth failure and platform qualification absent/invalidated notice.
+Production: Probe actual owned target; verify selected saved immutable config/image/company qualification plus lease cleanup; local API probe proves host/cwd only and has no UI Test button.
+Sources: Source: [CompanyEnvironments.tsx](../../ui/src/pages/CompanyEnvironments.tsx), [environment-probe.ts](../../server/src/services/environment-probe.ts). Tests: [CompanyEnvironments.test.tsx](../../ui/src/pages/CompanyEnvironments.test.tsx), [environment-probe.test.ts](../../server/src/__tests__/environment-probe.test.ts), [environment-live-ssh.test.ts](../../server/src/__tests__/environment-live-ssh.test.ts)
+
+#### `images`
+
+Scope: ui
+Storybook: Custom-image setup/capture/progress, terminal connect/disconnect/failure, unsupported capability and active-image drift.
+Production: Execute owned provider setup/capture/probe/terminal transport with correct saved image identity, authority, cleanup and shutdown; terminal screenshot cannot prove operation.
+Sources: Source: [CompanyEnvironments.tsx](../../ui/src/pages/CompanyEnvironments.tsx), [environment-custom-images.ts](../../server/src/services/environment-custom-images.ts). Tests: [CompanyEnvironments.test.tsx](../../ui/src/pages/CompanyEnvironments.test.tsx), [environment-custom-images-service.test.ts](../../server/src/__tests__/environment-custom-images-service.test.ts)

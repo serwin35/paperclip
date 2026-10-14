@@ -19,7 +19,7 @@ import path from "node:path";
 import { CONTROLLER_PROVISION_COPY_ONLY, workspaceRequiresCopyOnlyProvisioning } from "../workspace-host-provision.js";
 import { and, asc, eq } from "drizzle-orm";
 import { type ExecutionWorkspace } from "@paperclipai/shared";
-import { heartbeatRuns, projectWorkspaces } from "@paperclipai/db";
+import { heartbeatRuns, issues, projectWorkspaces } from "@paperclipai/db";
 import { getStartupTracer } from "../../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "../duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "../tool-runtime-metrics.js";
@@ -29,6 +29,7 @@ import { readNativeWorkspaceSyncReference, readNativeWorkspaceSyncLocalCwd } fro
 import { parseObject } from "../../adapters/utils.js";
 import { materializeNativeChatTaskRoot } from "../native-runtime/native-chat-workspace.js";
 import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
+import { canIsolateRemoteWorkspaceSource, materializeIsolatedRemoteWorkspaceSource } from "../isolated-remote-workspace-source.js";
 import {
   assertIsolatedWorkspaceSourceReadAccess,
   retainIsolatedWorkspaceSourceAccess,
@@ -484,12 +485,38 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   );
   const isolatedWorkspaceSourceActor = { type: "agent" as const, source: "agent_jwt" as const, companyId: agent.companyId,
     agentId: agent.id, runId: run.id, onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
-  const isolatedWorkspaceSourceAccess = !isDotRun && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId
+  let isolatedWorkspaceSourceAccess = null;
+  let isolatedRemoteSource: Record<string, unknown> | null = null;
+  if (!isDotRun && issueId && !persistedNativeExecutionInput && !nativeRecoveryExecutionWorkspaceId
     && (latestWorkspaceStrategyType === "git_worktree"
-      || (workspaceReuseProvisioningPolicy.shouldRestoreExistingWorkspace && reusableExistingExecutionWorkspace?.strategyType === "git_worktree"))
-    ? await assertIsolatedWorkspaceSourceReadAccess(db, {
+      || (workspaceReuseProvisioningPolicy.shouldRestoreExistingWorkspace && reusableExistingExecutionWorkspace?.strategyType === "git_worktree"))) {
+    try {
+      isolatedWorkspaceSourceAccess = await assertIsolatedWorkspaceSourceReadAccess(db, {
         companyId: agent.companyId, sourceCwd: executionWorkspaceBase.baseCwd, actor: isolatedWorkspaceSourceActor,
-      }) : null;
+      });
+    } catch (error) {
+      const [sourceChoice] = await db.select({ projectWorkspaceId: issues.projectWorkspaceId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        selection: issues.workspaceSelection }).from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)));
+      if (!sourceChoice || sourceChoice.executionWorkspaceId
+        || (sourceChoice.projectWorkspaceId && sourceChoice.projectWorkspaceId !== resolvedWorkspace.workspaceId)) throw error;
+      if (!canIsolateRemoteWorkspaceSource({ error, repoUrl: executionWorkspaceBase.repoUrl,
+        reuseExisting: requestedShouldReuseExisting, hasExistingWorkspace: Boolean(existingExecutionWorkspace),
+        selectedProjectWorkspaceId: sourceChoice.projectWorkspaceId ?? readNonEmptyString(context.projectWorkspaceId),
+        selection: sourceChoice.selection, strategy: parseObject(hostExecutionWorkspaceConfig.workspaceStrategy),
+        trustPresetKind: trustPreset.kind })) throw error;
+      const cwd = await materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
+        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider });
+      executionWorkspaceBase.baseCwd = cwd;
+      resolvedWorkspace.cwd = cwd;
+      isolatedRemoteSource = { schema: "paperclip.isolated-remote-source.v1", companyId: agent.companyId,
+        issueId, repoUrl: executionWorkspaceBase.repoUrl };
+      isolatedWorkspaceSourceAccess = await assertIsolatedWorkspaceSourceReadAccess(db, {
+        companyId: agent.companyId, sourceCwd: cwd, actor: isolatedWorkspaceSourceActor,
+      });
+    }
+  }
   const beforeIsolatedSourceCopy = isolatedWorkspaceSourceAccess
     ? (sourceCwd: string, targetCwd: string) => retainIsolatedWorkspaceSourceAccess(db, {
         companyId: agent.companyId, sourceCwd, targetCwd,
@@ -751,6 +778,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
   }
   const nextExecutionWorkspaceMetadata = {
     ...baseExecutionWorkspaceMetadata,
+    ...(isolatedRemoteSource ? { isolatedRemoteSource } : {}),
     ...(copyOnlyProvisioning ? { [CONTROLLER_PROVISION_COPY_ONLY]: true } : {}),
     ...(persistedWorktreeInstanceRoot
       ? {
@@ -832,6 +860,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       try {
         await cleanupExecutionWorkspaceArtifacts({
           workspace: {
+            companyId: agent.companyId,
             id:
               reusableExistingExecutionWorkspace?.id ??
               workspaceReuseRequest.requestedExecutionWorkspaceId ??

@@ -3921,6 +3921,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     const cleanup = await cleanupExecutionWorkspaceArtifacts({
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-1",
         cwd: workspace.cwd,
         providerType: "git_worktree",
@@ -3997,6 +3998,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     const cleanup = await cleanupExecutionWorkspaceArtifacts({
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-reused-cleanup",
         cwd: reused.cwd,
         providerType: "git_worktree",
@@ -4065,6 +4067,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     const cleanup = await cleanupExecutionWorkspaceArtifacts({
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-1",
         cwd: workspace.cwd,
         providerType: "git_worktree",
@@ -4129,6 +4132,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     const cleanup = await cleanupExecutionWorkspaceArtifacts({
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-1",
         cwd: workspace.cwd,
         providerType: "git_worktree",
@@ -4205,6 +4209,7 @@ process.stderr.write(${JSON.stringify(stderr)}, () => { process.exitCode = ${cod
 
     await cleanupExecutionWorkspaceArtifacts({
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-1",
         cwd: workspace.cwd,
         providerType: "git_worktree",
@@ -10011,6 +10016,7 @@ describe("realizeExecutionWorkspace with an exact existing branch", () => {
   ) {
     return {
       workspace: {
+        companyId: "company-1",
         id: "execution-workspace-1",
         cwd: workspace.cwd,
         providerType: "git_worktree",

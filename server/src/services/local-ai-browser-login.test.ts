@@ -63,6 +63,7 @@ function resolveFixtureCodexCommand(home: string): string {
 describe.skipIf(process.platform === "win32")("local browser subscription login", () => {
   it.each(["native", "arm32", "musl", "glibc-2.38", "glibc-3.0", "unknown"])("uses the selected Codex command with its credential home and ambient HOME/cwd (%s)", async platform => {
     const legacy = platform === "arm32";
+    if (platform === "native") targetPlatform("linux", "x64");
     if (platform === "arm32") targetPlatform("linux", "arm");
     if (platform === "musl") targetPlatform("linux", "arm64", false);
     if (platform === "glibc-2.38") targetPlatform("linux", "arm64", true, "2.38");
@@ -163,6 +164,7 @@ describe.skipIf(process.platform === "win32")("local browser subscription login"
   });
 
   it("reports a missing terminal prerequisite without exposing spawn details", async () => {
+    targetPlatform("linux", "x64");
     const home = await fakeCli("codex", "exit 0");
     process.env.PATH = path.join(root!, "no-python");
     const login = startLocalBrowserLogin("openai", home);

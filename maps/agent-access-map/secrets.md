@@ -136,6 +136,13 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
+Server-only instance secrets are excluded from this path. They belong to the
+company, owning agent, and installed lifecycle plugin. The existing local lifecycle
+callback can save them through the native secret service; there is no agent API
+for their values. Source: [native secret coordinator](../../server/src/services/agent-instance-secrets.ts)
+and [scope/denial tests](../../server/src/__tests__/agent-instance-secrets.test.ts).
+No live agent execution is claimed for this exclusion.
+
 Gaps: Values remain restricted to the bound agent and active run. Credential
 responses stay inline and use encrypted mutation receipts; they are not saved as
 plaintext response assets. Dedicated scenario read_secret_value remains unbound.

@@ -157,6 +157,28 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     expect((await read(run.id)).runnerProfileJson).toEqual(saved.runnerProfileJson);
   });
 
+  it("rejects resume after skill access revocation without rewriting the admitted revision", async () => {
+    const { input, run } = await fixture();
+    const key = "company/test/private-skill", versionId = randomUUID();
+    await db.update(heartbeatRuns).set({ contextSnapshot: { skillVersions: { [key]: versionId } } }).where(eq(heartbeatRuns.id, run.id));
+    input.run = await read(run.id);
+    vi.mocked(buildNativeRuntimeContext).mockImplementationOnce(async () => {
+      const context = nativeRuntimeContextFixture();
+      context.instructions.bundle.rootPath = instructionRoot;
+      context.skills = [{ key, runtimeName: "private-skill", versionId, bundle: { ...context.instructions.bundle } }];
+      return { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) };
+    });
+    const selected = await selectHeartbeatRuntime(db, input);
+    if (!selected.selected || !selected.nativeExecution) throw new Error("Expected native selection");
+    const saved = await read(run.id);
+    input.run = saved;
+    input.session.persistedNativeExecutionInput = selected.nativeExecution;
+    input.config.runtimeSkillEntries = [];
+    await expect(selectHeartbeatRuntime(db, input)).rejects.toThrow("Project skill access changed");
+    expect((await read(run.id)).runnerProfileJson).toEqual(saved.runnerProfileJson);
+    expect((await read(run.id)).contextSnapshot?.skillVersions).toEqual({ [key]: versionId });
+  });
+
   it.each(["cancelled", "startup_cancellation"])("does not create a native coordinator when %s wins preparation", async winner => {
     const { input, run } = await fixture();
     input.beforeNativeRuntimeSelection = async () => {

@@ -1681,7 +1681,8 @@ export function nativeSessionWorkspaceScope(execution: { binding: Pick<NativeExe
 
 function nativeProviderSessionScope(execution: NativeExecutionInput) {
   switch (execution.provider.kind) {
-    case "openai_dot": return { kind: "openai_dot", bindingId: execution.provider.binding.bindingId, generation: execution.provider.binding.bindingGeneration };
+    case "grok_bot":
+    case "openai_dot": return { kind: execution.provider.kind, bindingId: execution.provider.binding.bindingId, generation: execution.provider.binding.bindingGeneration };
     case "claude_managed":
       return {
         kind: execution.provider.kind,
@@ -5549,6 +5550,7 @@ function canonicalJson(value: unknown): string {
 
 function runnerProviderStateFilename(execution: NativeExecutionInput): string {
   switch (execution.provider.kind) {
+    case "grok_bot":
     case "openai_dot":
       return "dot-provider-state.json";
     case "codex":
@@ -5583,6 +5585,7 @@ export function providerSessionIdentityFromDurableProviderState(input: {
     providerSessionIdentity: null,
   });
   switch (input.execution.provider.kind) {
+    case "grok_bot":
     case "openai_dot":
       // Dot checkpoints recover the bridge only; there is no native provider thread.
       return emptyIdentity();
@@ -7531,7 +7534,7 @@ export async function executePaperclipNativeSession(input: {
     await retireSupersededWarmNativeSessions(
       ownerScope, nativeSessionScopeKey(input.execution),
     );
-    if (input.execution.provider.kind === "openai_dot" && isCloudManagedInstance()
+    if (input.execution.schema === "paperclip.native-execution-input.v6" && isCloudManagedInstance()
         && (!input.useRunnerd || input.runnerExecutionTarget?.kind !== "remote"
           || input.runnerExecutionTarget.transport !== "sandbox")) {
       throw new Error("dot_cloud_requires_managed_runner");
@@ -7556,7 +7559,7 @@ export async function executePaperclipNativeSession(input: {
     // a later sweep from closing an owner this turn is about to acquire.
     await closingWarmNativeSessions.get(sessionScopeId);
 
-    if (input.execution.provider.kind === "openai_dot") {
+    if (input.execution.schema === "paperclip.native-execution-input.v6") {
       return await executePaperclipNativeSessionWithinScope(input);
     }
     const workspaceRoot = input.execution.workspace.cwd;
@@ -7662,7 +7665,7 @@ async function executePaperclipNativeSessionWithinScope(
     input.execution.provider.kind !== "claude_managed" &&
     input.execution.provider.kind !== "aws_agentcore" &&
     input.execution.provider.kind !== "acpx" &&
-    input.execution.provider.kind !== "openai_dot"
+    input.execution.schema !== "paperclip.native-execution-input.v6"
   ) {
     throw new Error("paperclip_runner_provider_unsupported");
   }
@@ -8609,7 +8612,7 @@ async function executePaperclipNativeSessionWithinScope(
     controller,
   });
   try {
-    if (input.managedGitHub && input.execution.provider.kind !== "openai_dot") {
+    if (input.managedGitHub && input.execution.schema !== "paperclip.native-execution-input.v6") {
       if (!input.execution.workspace.cwd) throw new Error("native_workspace_required");
       githubAccess ??= await createNativeGitHubAccess({
         scope: input.execution.binding,
@@ -9415,7 +9418,9 @@ async function executePaperclipNativeSessionWithinScope(
             recoveryProjection.supersedeOnIdentityChange,
         });
       });
-      if (terminalRunToReport) void reportRunFailure(input.db, terminalRunToReport);
+      // Pass the raw error only for closed settlement labels: its text bypasses
+      // the identity redactor applied to the persisted message above.
+      if (terminalRunToReport) void reportRunFailure(input.db, terminalRunToReport, { nativeCloseFailure: error });
       await boundedExecutionCleanup(async () => {
         await stoppedLeaseRenewal;
         await attemptFailureStep(() =>
@@ -9594,7 +9599,7 @@ async function executePaperclipNativeSessionWithinScope(
     resultJson: {
       nativeResult: native.result as unknown as Record<string, unknown>,
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
-      ...(input.execution.provider.kind === "openai_dot" ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
+      ...(input.execution.schema === "paperclip.native-execution-input.v6" ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
       ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
       ...(native.goalRolloverRequired ? { goalRolloverRequired: true } : {}),
       planSynchronizations,
@@ -9605,7 +9610,7 @@ async function executePaperclipNativeSessionWithinScope(
     ...resolveNativeBilling(input.execution.provider, input.runnerEnvironment, input.billingIdentity),
     model: input.execution.provider.model,
     usage: normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" }),
-    costUsd: input.execution.provider.kind !== "openai_dot" && normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
+    costUsd: input.execution.schema !== "paperclip.native-execution-input.v6" && normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
       ? nativeUsageCostUsd(native.usage, input.execution.provider) ?? null : null,
     costUsdExact: typeof native.usage?.accountingCostUsdExact === "string" ? native.usage.accountingCostUsdExact : undefined,
     costStatus: nativeAccountingComplete && native.usage?.accountingCostIncomplete !== true
@@ -9775,6 +9780,7 @@ export function nativeUsageCostUsd(
 /** Billing identity follows the selected runtime and resolved credentials.
  * Unknown authentication remains unknown; a provider name does not prove billing mode. */
 export function resolveNativeBilling(provider: NativeExecutionInput["provider"], env: NodeJS.ProcessEnv = {}, identity?: Pick<AdapterExecutionResult, "provider" | "biller" | "billingType">): Pick<AdapterExecutionResult, "provider" | "biller" | "billingType"> {
+  if (provider.kind === "grok_bot") return { provider: "grok_bot", biller: "unknown", billingType: "unknown" };
   if (identity) return identity.provider === "openai" && identity.billingType === "metered_api"
     ? { ...identity, biller: inferOpenAiCompatibleBiller(env, identity.biller ?? "unknown") }
     : identity;
@@ -10143,7 +10149,7 @@ function readRemoteProviderPackIdentity(packRoot: string, verifyControllerFiles:
 export function assertRemoteRunnerBuildMetadata(
   value: unknown,
   requiredMode: "dial_wss" | "listen_ws",
-  requiredExternalProvider?: "openai_dot_mcp",
+  requiredExternalProvider?: "openai_dot_mcp" | "grok_bot_mcp",
 ): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("runner_remote_artifact_metadata_invalid");
@@ -11244,7 +11250,7 @@ async function prepareRemoteDotRunner({ input, target, runner, root, identity }:
     }
     const metadata = await runner.execute({ command: remoteBinary, args: ["--build-metadata"], bypassSession: true, timeoutMs: 30000 });
     if (metadata.exitCode !== 0 || metadata.timedOut) throw new Error("runner_remote_artifact_verification_failed");
-    assertRemoteRunnerBuildMetadata(JSON.parse(metadata.stdout), requiredMode, "openai_dot_mcp");
+    assertRemoteRunnerBuildMetadata(JSON.parse(metadata.stdout), requiredMode, input.execution.provider.kind === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp");
     const checksum = await runner.execute({ command: "sh", args: ["-c",
       'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi', "paperclip-dot-artifact", remoteBinary],
       bypassSession: true, timeoutMs: 10000 });
@@ -11377,7 +11383,7 @@ async function createRunnerdBackendWithinSessionClaim(
   // Remote Codex already sends dynamic tool calls over authenticated PRP. Keep
   // the assigned gateway on the control plane instead of asking the sandbox to
   // reach the host's HTTP origin (which may be private or loopback-only).
-  const relayAssignedMcp = (remoteTarget !== null && input.execution.provider.kind === "codex") || input.execution.provider.kind === "openai_dot";
+  const relayAssignedMcp = (remoteTarget !== null && input.execution.provider.kind === "codex") || input.execution.schema === "paperclip.native-execution-input.v6";
   const assignedMcpUrl = input.runnerEnvironment?.PAPERCLIP_NATIVE_MCP_URL;
   const assignedMcpToken = input.runnerEnvironment?.PAPERCLIP_NATIVE_MCP_TOKEN;
   const assignedMcpName = input.runnerEnvironment?.PAPERCLIP_NATIVE_MCP_NAME;
@@ -11399,7 +11405,7 @@ async function createRunnerdBackendWithinSessionClaim(
         workMode: input.execution.task.workMode,
       })
     : undefined;
-  const dotAttachmentActor = input.execution.provider.kind === "openai_dot"
+  const dotAttachmentActor = input.execution.schema === "paperclip.native-execution-input.v6"
     ? await input.db.select({ config: agents.adapterConfig }).from(agents).where(and(
         eq(agents.id, input.execution.binding.agentId), eq(agents.companyId, input.execution.binding.companyId),
       )).limit(1).then(rows => rows[0]) : undefined;
@@ -11418,10 +11424,11 @@ async function createRunnerdBackendWithinSessionClaim(
         : undefined,
     workMode: input.execution.task.workMode,
     runtimeContext: "runtimeContext" in input.execution ? input.execution.runtimeContext : undefined,
-    workspaceBridge: input.execution.provider.kind === "openai_dot" && !!input.dotWorkspaceRoot,
+    workspaceBridge: input.execution.schema === "paperclip.native-execution-input.v6" && !!input.dotWorkspaceRoot,
     taskAttachmentRead: dotAttachmentActor?.config.dotAttachmentAccess === true,
-    dotRuntime: input.execution.provider.kind === "openai_dot",
-    assertBridgeAuthority: input.execution.provider.kind === "openai_dot" ? () => dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6) : undefined,
+    dotRuntime: input.execution.schema === "paperclip.native-execution-input.v6",
+    firstPartyOnly: input.execution.provider.kind === "grok_bot",
+    assertBridgeAuthority: input.execution.schema === "paperclip.native-execution-input.v6" ? () => dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6) : undefined,
     workspaceRoot: input.dotWorkspaceRoot ?? remoteTarget?.remoteCwd ?? input.execution.workspace.cwd ?? undefined,
     executionTargetKind: target.kind,
     readRemoteWorkspaceFile: remoteTarget && remoteCommandRunner

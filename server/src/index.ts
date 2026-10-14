@@ -1,8 +1,10 @@
+import { skillSourceSyncService } from "./services/skill-source-sync.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
+import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./services/terminal-workspace-work.js";
 import { isIdleTaskDrainActive, beginIdleTrackedWork, trackIdleWork } from "./services/task-admission.js";
-import { markIdleStartupComplete } from "./services/idle-local-work.js";
+import { markIdleStartupComplete, registerIdleLocalWorkProbe } from "./services/idle-local-work.js";
 import { clearIdleBackupWakeRequired, idleBackupWakeMarker, markIdleBackupWakeRequired, verifyIdleDatabaseBackup } from "./services/idle-database-backup.js";
 import { cloudWarmStandbyServerOptions } from "./middleware/cloud-warm-standby.js";
 import { createCloudWarmStandby } from "./services/cloud-warm-standby.js";
@@ -1213,11 +1215,22 @@ async function startServerWithDatabaseTeardown(
     }, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
   };
+  const skillSourceSync = skillSourceSyncService(db as any);
+  const sweepSkillSources = () => {
+    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
+    trackHeartbeatSchedulerWork(skillSourceSync.tick().catch(err => {
+      logger.error({ err }, "skill source synchronization failed");
+    }));
+  };
+  const skillSourceSyncInterval = setInterval(sweepSkillSources, 5000);
+  skillSourceSyncInterval.unref?.();
+  sweepSkillSources();
   const externalObjects = externalObjectService(db as any, {
     pluginWorkerManager,
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
+    sweepSkillSources();
     if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
@@ -1277,6 +1290,7 @@ async function startServerWithDatabaseTeardown(
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
   const deliveryWork = app.locals.deliveryWork as ReturnType<typeof createDeliveryWorkCoordinator>;
+  let unregisterTerminalWorkspaceProbe: (() => void) | undefined;
   const fastResponses = app.locals.fastResponses as ReturnType<typeof import("./services/fast-responses.js").fastResponseService>;
   const fastResponseWorker = deliveryWork.register(DELIVERY_QUEUES.fastResponse, {
     retryMs: 100, run: (signal) => fastResponses.sweepPending(signal), hasPending: () => fastResponses.hasPending(),
@@ -1377,6 +1391,10 @@ async function startServerWithDatabaseTeardown(
     });
     const terminalWorkspaces = executionWorkspaceService(db as any, {
       workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,
+      workspaceCompactionDelayMs: config.workspaceCompactionDelayHours === null
+        ? null
+        : config.workspaceCompactionDelayHours * 60 * 60 * 1000,
+      terminalWorkspaceInspectionBackoffMs: TERMINAL_WORKSPACE_RETRY_MS,
     });
     const scheduleMergedPullRequestConfirmationSweep = () => {
       if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
@@ -1391,36 +1409,22 @@ async function startServerWithDatabaseTeardown(
           logger.error({ err }, "merged pull-request confirmation sweep failed");
         }));
     };
-    // Emit a periodic signal when the reaper inspects candidates but archives
-    // none, so an inert reaper that skips every candidate is never fully silent.
-    // The throttle keeps the 30s cadence from flooding the log.
     let lastTerminalWorkspaceSkipLogAt = 0;
-    const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
-    const scheduleTerminalWorkspaceSweep = () => {
-      if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-      trackHeartbeatSchedulerWork(terminalWorkspaces
-        .sweepTerminalWorkspaces()
-        .then((result) => {
-          if (result.archived > 0 || result.cleanupFailed > 0) {
-            logger.info(result, "terminal issue workspace reaper changed workspace state");
-            return;
-          }
-          const skipped =
-            result.skippedActiveRun
-            + result.skippedNonTerminalTree
-            + result.skippedUndelivered
-            + result.skippedRace
-            + result.skippedCooldown;
-          const nowMs = Date.now();
-          if (skipped > 0 && nowMs - lastTerminalWorkspaceSkipLogAt >= terminalWorkspaceSkipLogIntervalMs) {
-            lastTerminalWorkspaceSkipLogAt = nowMs;
-            logger.info(result, "terminal issue workspace reaper skipped all candidates");
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, "terminal issue workspace reaper failed");
-        }));
-    };
+    const terminalWorkspaceWorker = registerTerminalWorkspaceWork(deliveryWork, {
+      ...terminalWorkspaces,
+      sweepTerminalWorkspaces: async (limit, signal) => {
+        const result = await terminalWorkspaces.sweepTerminalWorkspaces(limit, signal);
+        if (result.archived > 0 || result.cleanupFailed > 0 || result.compacted > 0 || result.compactionFailed > 0) {
+          logger.info(result, "terminal issue workspace reaper changed workspace state");
+        } else if (result.checked > 0 && Date.now() - lastTerminalWorkspaceSkipLogAt >= 10 * 60 * 1000) {
+          lastTerminalWorkspaceSkipLogAt = Date.now();
+          logger.info(result, "terminal issue workspace reaper skipped all candidates");
+        }
+        return result;
+      },
+    }, () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
+    unregisterTerminalWorkspaceProbe = registerIdleLocalWorkProbe(() => terminalWorkspaceWorker.hasUnrecoveredWork() ? "present" : "none");
+    await terminalWorkspaceWorker.ready;
 
     // The restart-safe cleanup backstop for adapter login sessions. The
     // in-process five-minute timer stays the primary control. This reaper runs
@@ -1732,7 +1736,6 @@ async function startServerWithDatabaseTeardown(
         scheduleMergedPullRequestConfirmationSweep();
         scheduleGitHubConnectionEventPoll();
         scheduleGitHubConnectionContinuitySweep();
-        scheduleTerminalWorkspaceSweep();
         scheduleAdapterLoginReaperSweep();
         scheduleSetupTokenReaperSweep();
         scheduleEnvironmentLeaseCleanupSweep();
@@ -1992,8 +1995,11 @@ async function startServerWithDatabaseTeardown(
     // Stop polling but keep the last limits, so runs promoted while the
     // server drains still respect pacing.
     quotaPacing.stop();
+    clearInterval(skillSourceSyncInterval);
+    await skillSourceSync.stop();
     unsubscribeChatCompletions();
     await deliveryWork.stop();
+    unregisterTerminalWorkspaceProbe?.();
     clearInterval(executionControlInterval);
     if (heartbeatSchedulerInterval) {
       clearInterval(heartbeatSchedulerInterval);
@@ -2072,7 +2078,12 @@ async function startServerWithDatabaseTeardown(
       closeHttpListener: () =>
         closeHttpListenerForShutdown({ server, signal, log: logger }),
       drainPendingRunFailureReports: waitForPendingRunFailureReports,
-      closeDatabase: closeDatabaseClients,
+      // Mark the pool as ending before `sql.end()` rejects the first query,
+      // so the error handler recognizes a request that outlived the drain.
+      closeDatabase: () => {
+        (app.locals as { paperclipDatabaseClosing?: boolean }).paperclipDatabaseClosing = true;
+        return closeDatabaseClients();
+      },
       stopEmbeddedPostgres,
       shutdownInstrumentation,
       shutdownSentry,

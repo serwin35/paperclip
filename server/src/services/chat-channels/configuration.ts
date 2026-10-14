@@ -181,7 +181,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
             code: "chat_endpoint_not_active",
           });
         }
-        await notifyChatEndpointWork(tx);
+        await notifyChatEndpointWork(tx, endpoint.connectionId);
         await tx
           .update(chatEndpoints)
           .set({
@@ -317,7 +317,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
                 inArray(chatDeliveries.state, ["received", "retry"]),
               ),
             );
-          await notifyChatEndpointWork(tx);
+          await notifyChatEndpointWork(tx, endpoint.connectionId);
           [activatedEndpoint] = await tx
             .update(chatEndpoints)
             .set({
@@ -364,7 +364,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
           const failedAt = new Date();
           await db.transaction(async (tx) => {
             await credentialLease.assertOwned(tx);
-            await notifyChatEndpointWork(tx);
+            await notifyChatEndpointWork(tx, endpoint.connectionId);
             await tx
               .update(chatEndpoints)
               .set({
@@ -467,7 +467,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
             code: "chat_endpoint_already_removed",
           });
         }
-        await notifyChatEndpointWork(tx);
+        await notifyChatEndpointWork(tx, endpoint.connectionId);
         await tx
           .update(chatEndpoints)
           .set({
@@ -698,7 +698,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
       try {
         const claimed = await db.transaction(async (tx) => {
           await credentialLease.assertOwned(tx);
-          await notifyChatEndpointWork(tx);
+          await notifyChatEndpointWork(tx, endpoint.connectionId);
           const rows = await tx
             .update(chatEndpoints)
             .set({
@@ -778,7 +778,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
         const preserveSlackVerification = isProvisionedSlackSetup(current.setup.slackSetupMethod)
           && (current.setup as InternalSetupState).slackVerificationSigningFingerprint === createHash("sha256").update(credentials.signingSecret ?? "").digest("hex")
           && Boolean(observedSlackUrl && slackCallbackMatchesPublicUrl(observedSlackUrl, `${getWebhookPublicBaseUrl()}/api/chat-webhooks/${endpoint.publicId}/slack`));
-        await notifyChatEndpointWork(tx);
+        await notifyChatEndpointWork(tx, endpoint.connectionId);
         await tx
           .update(chatEndpoints)
           .set({
@@ -863,7 +863,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
       await invalidateRuntime(endpoint.id).catch(() => undefined);
       await db.transaction(async (tx) => {
         await credentialLease.assertOwned(tx);
-        await notifyChatEndpointWork(tx);
+        await notifyChatEndpointWork(tx, endpoint.connectionId);
         await tx
           .update(chatEndpoints)
           .set({

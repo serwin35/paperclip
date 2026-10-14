@@ -124,28 +124,30 @@ API responses and MCP transports keep their existing compression behavior.
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
 
-Stories are grouped in `ui/storybook/stories/<feature-area>/` and the sidebar follows
-the feature map's sections and feature names. Shared fixtures live in
-`ui/storybook/support/`. Keep each suite's explicit meta `id` and catalog `stableId`
-when changing titles or locations so existing review links remain valid.
+Stories are grouped in `ui/storybook/stories/<feature-area>/`. Feature recipe
+navigation controls the sidebar. Shared fixtures live in `ui/storybook/support/`.
+Keep each suite's explicit meta `id` when changing titles or locations so existing
+review links remain valid. Author capability associations, implementation/data
+classification and durable limitations in the story's `parameters.paperclip`.
 
-Storybook's Overview mirrors every feature in the feature-map README, including
-features without examples. Each feature's generated Overview lists its capabilities
-in recipe order, related suites across primary homes, and missing examples.
-`ui/storybook/generated/` holds the derived pages; the preview config's inline
-`storySort.order` is generated too. Regenerate these outputs
-with `node scripts/storybook-catalog.mjs --write`, not manual edits. Storybook
-start/build rejects stale generated output. These guide pages are separate from
-the authored story inventory and do not count as visual or behavioral coverage.
+Storybook start/build generates the catalog, feature Overview pages, and literal
+sidebar order from the checked-out sources. `ui/storybook/generated/` and
+`ui/storybook/.storybook/preview.tsx` are ignored build outputs. Shared preview
+fixtures and decorators live in `preview-base.tsx`; generation never edits it.
+UI typechecking also generates the inputs on a fresh checkout.
 
-Start from the downstream [Storybook feature index](../maps/storybook-map/INDEX.md)
-to find existing stories by capability. Its [contract](../maps/storybook-map/README.md)
-separates production subjects, prototype implementations, simulated data, and
-source-review status. Use `maintain-storybook` to reconcile stories/fixtures with
-the feature map, and `review-storybook` to exercise them with existing tools.
-Run `node scripts/storybook-catalog.mjs` after affected story or review-source
-changes; review drift before updating fingerprints, then regenerate with `--write`.
-The feature map remains an upstream input and needs no Storybook-specific fields.
+Run `node scripts/storybook-catalog.mjs` to assemble the local Markdown indexes,
+verification routes and page inventory under `maps/generated/`. Use `--check`
+for validation without writes. These outputs are not committed. Use Git diffs to
+select affected sources for review; do not maintain review fingerprints or append
+a shared review journal. Record executed evidence in the PR, issue, or CI result.
+
+The [Storybook map contract](../maps/storybook-map/README.md) describes annotations
+and the [published guide](https://d1p6rlowie26tp.cloudfront.net/storybook/branches/master/?path=/story/overview-storybook-guide--coverage-guide).
+Use `maintain-storybook` for source alignment and `review-storybook` for rendering
+and interactions. Generated guides, example counts and structural checks do not
+establish production behavior. Feature recipes retain optional verification
+scope guidance; the feature/access structural check needs no Storybook runtime.
 
 **Chat & Comments → Human identity** covers other-human names and avatars on
 left-aligned task messages alongside agents; only the viewer’s own messages are blue/right-aligned. Its review guide explains the data flow; the task journey uses representative
@@ -542,7 +544,7 @@ npx paperclipai allowed-hostname dotta-macbook-pro
 
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.
-Its page inventory is a source snapshot. The documented journeys have separate
+Its generated page inventory lists current source references. The documented journeys have separate
 verification steps and do not run automatically from the map.
 
 The sibling [agent access map](../maps/agent-access-map/README.md) describes API
@@ -931,6 +933,11 @@ No Docker or external database is required for this mode.
 - `off`: skip the predicate and shadow logging
 
 Grant checks read current database state; there is no positive privacy cache.
+
+A run-history list is one read operation. It checks each distinct company,
+run scope, and task binding once, then applies that decision to the related
+rows in the same response. Every new list operation reads permissions again.
+
 Sharing a task grants access to that task and its private descendants. Parents
 and siblings need separate grants. An agent's access is intersected with its
 run's responsible user's current access.
@@ -1020,6 +1027,13 @@ When an additional repository has a configured local checkout, Paperclip seeds t
 
 Sandbox staging, including Daytona, transfers each repository's Git history and working files. Restore merges files and commits back into each local task checkout independently. Durable sandbox recovery keeps the same repository snapshots. Normal ignore and workspace exclusion rules still apply. A clone failure stops task preparation with an error so the agent does not start with only part of the project.
 
+An interrupted legacy run can retain a file recovery hold after its automatic
+replay decision is resolved. The task's recovery notice remains authoritative.
+After recovering and verifying files from the original workspace, a board member
+with runtime access can record the evidence in that notice. This operation checks
+the exact source run and stop receipts, leaves the task status unchanged, and does
+not start another run. A chat reply cannot clear the file recovery hold.
+
 Staging preserves relative symlink targets in secondary repositories, including skill links such as `.claude/skills/demo -> ../../skills/demo`. It does not rewrite them to host temporary paths or copy their target contents in place of the link. Daytona still rejects outbound archives with absolute or escaping link targets before extraction.
 
 If a repository is detached or its source configuration changes, its previous task copy is retained under `.paperclip-runtime/detached-repositories/` and excluded from future sandbox transfers. Referenced projects continue to use the separate read-only multi-project workspace behavior.
@@ -1050,6 +1064,20 @@ These bounds apply to application filename storage, not total process memory. Re
 Workspace preparation resolves an existing root symlink before reading the snapshot and uses that resolved directory for the rest of the operation. Overlay staging checks the captured root identity and each selected path's ancestors before and after copying. A replaced root or a symlink in an ancestor directory stops staging before upload. A missing source file can be skipped; other source inspection errors stop staging. Selected symlink entries remain symlinks.
 
 Execution-workspace close-readiness and branch-reconciliation status checks allow up to 32 MiB of buffered output. This accommodates nested task worktrees while preserving exact untracked-file counts. Larger output fails the scan and blocks destructive cleanup. Other buffered scan bounds stay unchanged.
+
+Heartbeat configuration, environment selection, and finalization read persisted
+workspace records through the company-scoped `getStoredById` service method.
+Those reads do not inspect Git, refresh runtime service health, or resolve PR
+delivery. Workspace detail responses still load live display state, and the
+execution and cleanup boundaries retain their live branch and cleanliness
+guards. Close readiness derives ancestry from its existing ahead/behind
+comparison, avoiding a second history walk with `merge-base`.
+
+Measure the avoided reads on synthetic workspaces with
+`pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-workspace-record-reads.ts`.
+The benchmark checks identical persisted fields and reports wall time and actual
+Git command counts. Use `--resident-mib=1536` to exercise a large Node process on
+Linux. It measures workspace reads, not end-to-end agent latency.
 
 The cache intentionally trades up to a few seconds of changed-file freshness for stable server latency. The file browser retains an explicit refresh action, does not start its query while the panel or browser tab is hidden, and presents overloads as retryable failures rather than an empty workspace. A full queue returns `503` with code `workspace_git_scan_saturated`; a scan exceeding its wall-clock limit returns `504` with code `workspace_git_scan_timeout`. Both responses include `Retry-After: 1`.
 
@@ -1363,6 +1391,8 @@ When a workspace service runs Paperclip for browser OAuth QA, configure its `exp
 ## Heartbeat Service Extractions
 
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
+Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)
+for state lifetime, admission, recovery ownership, cleanup ordering, and verification.
 
 Runtime-service coordination is in `server/src/services/heartbeat/runtime-services.ts`.
 It validates service intents, starts configured services, records adapter-managed
@@ -1991,9 +2021,16 @@ Environment overrides:
 - `PAPERCLIP_WORKSPACE_REAPER_COOLDOWN_DAYS=<days>` sets how long the
   terminal-workspace reaper waits after an issue tree becomes terminal before it
   archives the execution workspace and deletes the worktree. A person can reopen
-  the work inside this window. The default is `7`. A value of `0` disables the
+  the work inside this window. The default is `1`. A value of `0` disables the
   cooldown and restores immediate reaping. A negative or non-numeric value falls
   back to the default.
+- `PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS=<hours>` sets how long the reaper
+  waits after an issue tree becomes terminal before it removes regenerable files
+  from the workspace (see "Terminal workspace compaction" below). The default is
+  `1`. A value of `0` compacts on the next sweep. A negative, empty, or
+  non-numeric value falls back to the default.
+- `PAPERCLIP_WORKSPACE_COMPACTION_ENABLED=false` turns compaction off. Any other
+  value keeps it on.
 
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,
@@ -2255,10 +2292,42 @@ that flushes after the tab hides marks data stale without starting a refetch.
 The developer-server health poll also stops in hidden tabs.
 
 Workspace detail responses share concurrent Git inspections and reuse their
-results for up to five seconds after completion. The cache holds at most 256
-entries. Close-readiness checks, the terminal-workspace reaper, and the final
-cleanup validation still inspect Git afresh. A display result never authorizes
-worktree removal.
+results for up to thirty seconds after completion. Workspace identity and metadata
+changes invalidate the cached result. The cache holds at most 256
+entries. Close-readiness checks and final cleanup validation request separate
+Git scans that cannot join an older in-flight scan. A display result never
+authorizes worktree removal.
+
+The terminal-workspace reaper uses the database work coordinator. Startup scans
+recover existing workspace rows in bounded pages. Issue status and tree changes,
+workspace lifecycle writes, and pull-request work-product writes signal work on
+their transaction before writing. The coordinator wakes after the outer
+transaction settles and holds idle admission while writes or cleanup are active.
+Empty and nonterminal-only lanes have no recurring timer or query. Terminal trees
+schedule their actual cooldown deadline; unresolved delivery or cleanup eligibility
+is checked again after five minutes. Nonterminal trees, cooldowns, and active runs
+are checked before Git. The worker shares Git readiness across compatible rows
+that point at one directory within a bounded page. Company, branch, base ref,
+and runtime ownership must match. Each row keeps its own task and delivery
+assessment, which reuses the task tree read by the early gate. Unchanged terminal
+candidates also back off for five minutes during unrelated commit wakes. Scoped
+task/workspace hints invalidate
+affected candidates; changed tree or workspace revisions invalidate them too.
+Deadline selection reuses task trees read by those pages and performs no separate
+full-inventory query. Commits during a paged rotation request another bounded
+rotation so changes behind its cursor are recovered.
+The backoff retains at most 256 candidates and only applies to the background
+worker. Final cleanup still checks the current task tree,
+delivery evidence, ownership, lifecycle generation, and Git state under the
+existing cleanup locks.
+
+These wakes cover the owning `createDb` scope in this server process. Direct SQL
+and other server processes require startup recovery. Local deadlines do not
+establish external wake-alarm coverage or whole-instance sleep safety. The local
+sleep inventory blocks host suspension until bounded recovery succeeds. Cooldown
+eligibility is an earliest allowed cleanup time; passive retained directories can
+wait for the next wake, when startup restores their rows. Existing idle-sleep
+blockers and cleanup admission holds remain authoritative.
 
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their
@@ -2270,6 +2339,55 @@ from stored configuration problems. Verify connection transport and endpoint
 fields before disabling a connection. Verify workspace ownership, active runs,
 Git state, and runtime-service readiness before closing a workspace. A missing
 URL or old workspace timestamp alone does not prove that a row is disposable.
+
+### Terminal workspace compaction
+
+A finished task often keeps its worktree for a long time: the reaper archives a
+worktree only when its delivery is merged and its files are clean, and then only
+after the cooldown. Most of a worktree's size is installed dependencies and build
+output, not work. Compaction removes those files and keeps everything else, so a
+finished task does not hold gigabytes while it waits for the reaper (or forever,
+when it has no merged pull request or has leftover files).
+
+The reaper compacts a workspace once per terminal cycle, after
+`PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS`, when all of these hold:
+
+- the workspace is an isolated linked Git worktree (never a shared workspace or a
+  project's main checkout);
+- every issue in its tree is done or cancelled;
+- no queued or running heartbeat run works on the tree or the workspace;
+- no runtime service runs from the workspace.
+
+Compaction removes only directories that have a regenerable name
+(`node_modules`, `dist`, `build`, `coverage`, `storybook-static`, `target`,
+`.cache`, `.next`, `.nuxt`, `.parcel-cache`, `.svelte-kit`, `.turbo`, `.vite`),
+that the repository's own `.gitignore` files ignore (a negated pattern, a global
+excludes file, or `.git/info/exclude` does not count), and that hold no tracked
+file. A directory with such a name
+that does not qualify (for example a tracked `build/`) is searched in turn, so
+ignored dependencies inside it still go. It never enters `.git` or
+`.paperclip`, and it never follows a symlink. It checks each directory's ignore
+status on its own, so dependencies below an ignored parent (for example
+`vendor/tool/node_modules`) are found. Its Git reads have a deadline and stop
+when the sweep stops. Tracked files, uncommitted changes,
+untracked files, other ignored files (such as `.env` or local data), the branch,
+and its commits all stay. The workspace row stays active.
+
+The removal is a rename into `.paperclip-compaction-trash` beside the worktree,
+made while the reaper holds the workspace lifecycle lock. The reaper checks the
+conditions above before the rename and again after it, in the same transaction.
+If the task reopened or a run started in between, the directories move back.
+Otherwise the trash is deleted. Trash that an interrupted compaction or a failed
+delete leaves behind is deleted by a later sweep once it is more than an hour
+old. The sweep checks each worktree parent directory at most every 30 minutes,
+whether or not anything is left to compact.
+
+A compacted worktree is in the same state as a freshly created one, so when the
+task resumes, whatever produced those files the first time produces them again:
+reuse runs the workspace provision command (or `scripts/provision-worktree.sh`),
+which reinstalls dependencies when `node_modules` is missing. Repositories without
+a provision command rely on the agent's own install step, as they do for a new
+worktree.
 
 ### Browser realtime connection recovery
 
@@ -2309,3 +2427,16 @@ companion broker profile and Slack approval. Do not add manager client credentia
 to a local `.env` or an open-source deployment. See
 [Slack setup and Cloud qualification](connections/slack-setup.md) for the gates,
 recovery behavior, and production-component stories.
+
+### Project repository skills
+
+New GitHub project workspace attachments enqueue imports transactionally. A bounded
+server worker drains imports and checks enabled sources every five minutes. Shutdown
+cancels owned scans and releases their leases. Sources can be refreshed manually or
+paused through Skills → Sources. Legacy repositories appear there without being
+imported until the user chooses Import skills.
+
+Storybook: **Skills → Project repository skills**. Its production UI journeys use
+in-memory provider and execution fixtures. Live GitHub refresh and execution need
+separate acceptance evidence. Run the focused browser suite against built Storybook,
+or set `STORYBOOK_TEST_BASE_URL` to an owned Storybook dev server.

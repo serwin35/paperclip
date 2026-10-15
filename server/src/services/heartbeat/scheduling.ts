@@ -53,7 +53,12 @@ import { evaluateAgentInvokability } from "../agent-invokability.js";
 import type { Db } from "@paperclipai/db";
 import type { issueService } from "../issues.js";
 import type { createHeartbeatQueue } from "./queue.js";
-import type { createHeartbeatRetries, HeartbeatRetryDependencies } from "./retries.js";
+import {
+  BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
+  type createHeartbeatRetries,
+  type HeartbeatRetryDependencies,
+} from "./retries.js";
+import { executionFailureRetryCount } from "../execution-recovery-attempt.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { NativeSessionGoalControl } from "../../vendor/paperclip-runner/index.js";
 
@@ -665,11 +670,21 @@ export function createHeartbeatScheduling(
           const targetAgent = await getAgent(targetAgentId);
           if (!targetAgent)
             throw conflict("The quota recovery agent is unavailable.");
+          // Retries made while the quota was still exhausted can spend the
+          // transient budget before this monitor takes over. The elapsed quota
+          // wait earns one more attempt; without it the retry is a silent
+          // no-op and recovery re-arms the monitor forever.
+          const spentFailureRetries = executionFailureRetryCount(sourceRun);
+          const quotaWaitAttempt =
+            spentFailureRetries >= BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS
+              ? { maxAttempts: spentFailureRetries + 1, delayMs: 0 }
+              : {};
           const scheduled = await scheduleBoundedRetryForRun(
             sourceRun,
             targetAgent,
             {
               now: input.now,
+              ...quotaWaitAttempt,
               ...(isProviderQuotaReviewMonitor
                 ? {
                     retryReason:

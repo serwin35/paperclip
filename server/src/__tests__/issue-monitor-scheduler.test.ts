@@ -388,6 +388,28 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     expect(await db.select().from(issueRecoveryActions)).toMatchObject([{ ownerType: "board", evidence: { runId: sourceRunId } }]);
   });
 
+  it("retries the owner once the quota wait elapses after the transient budget was spent on the limit", async () => {
+    const sourceRunId = randomUUID();
+    const { companyId, issueId, agentId } = await seedFixture({
+      monitor: { serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME, externalRef: sourceRunId },
+    });
+    // Both transient retries hit the same exhausted quota before the monitor took over.
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId, companyId, agentId, status: "failed", errorCode: "provider_quota",
+      finishedAt: new Date("2026-04-11T12:00:00.000Z"), contextSnapshot: { issueId },
+      scheduledRetryAttempt: 2, scheduledRetryReason: "transient_failure",
+      resultJson: { conversationContinuation: "continue_conversation_v1", errorFamily: "provider_quota" },
+    });
+    const heartbeat = heartbeatService(db);
+    const tickAt = new Date("2026-04-11T12:31:00.000Z");
+
+    expect(await heartbeat.tickTimers(tickAt)).toMatchObject({ enqueued: 1 });
+    const [retry] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, sourceRunId));
+    expect(retry).toMatchObject({ agentId, status: "scheduled_retry", scheduledRetryAttempt: 3 });
+    expect(retry.scheduledRetryAt).toEqual(tickAt);
+    expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
+  });
+
   it("wakes a cross-agent review participant for provider quota monitors", async () => {
     const sourceRunId = randomUUID();
     const { companyId, issueId, agentId: assigneeAgentId } = await seedFixture({

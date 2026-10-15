@@ -18,6 +18,7 @@ const mockProjectsApi = vi.hoisted(() => ({
 }));
 const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
+  listAll: vi.fn(),
   update: vi.fn(),
 }));
 const mockAgentsApi = vi.hoisted(() => ({ list: vi.fn() }));
@@ -194,6 +195,7 @@ describe("ProjectDetail", () => {
     mockProjectsApi.get.mockResolvedValue(project());
     mockProjectsApi.list.mockResolvedValue([project()]);
     mockIssuesApi.list.mockResolvedValue([]);
+    mockIssuesApi.listAll.mockResolvedValue([]);
     mockAgentsApi.list.mockResolvedValue([]);
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
     mockBudgetsApi.overview.mockResolvedValue({ policies: [] });
@@ -290,7 +292,7 @@ describe("ProjectDetail", () => {
     const summaryCard = container.querySelector('[data-testid="summary-slot-card"]');
     expect(titleEditor && summaryCard ? Boolean(titleEditor.compareDocumentPosition(summaryCard) & Node.DOCUMENT_POSITION_FOLLOWING) : false).toBe(true);
     expect(container.textContent).toContain("Plugin operations");
-    expect(mockIssuesApi.list).toHaveBeenCalledWith("company-1", {
+    expect(mockIssuesApi.listAll).toHaveBeenCalledWith("company-1", {
       projectId: "project-1",
       originKindPrefix: "plugin:paperclip.missions",
     });

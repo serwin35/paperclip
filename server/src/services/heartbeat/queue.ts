@@ -4057,6 +4057,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 ? withQueuedCommentIdsInRunContext(
                     enrichedContextSnapshot,
                     adoptedCommentIds,
+                    adoptedComments.map((wake) => wake.id),
                   )
                 : enrichedContextSnapshot,
               sessionIdBefore: explicitContinuation ? null : sessionBefore,

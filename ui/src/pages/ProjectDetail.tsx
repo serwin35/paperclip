@@ -292,7 +292,8 @@ function ProjectPluginOperationsList({
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
   const { data: issues, isLoading, error } = useQuery({
     queryKey: queryKeys.issues.listPluginOperationsByProject(companyId, projectId, originKindPrefix),
-    queryFn: () => issuesApi.list(companyId, { projectId, originKindPrefix }),
+    // A project can hold more tasks than one list page (500); load every page.
+    queryFn: () => issuesApi.listAll(companyId, { projectId, originKindPrefix }),
     enabled: !!companyId && !!projectId,
   });
   const liveIssueIds = useMemo(() => collectLiveIssueIds(liveRuns, issues), [issues, liveRuns]);
@@ -408,7 +409,7 @@ export function ProjectDetail() {
     queryKey: workspaceTabProjectId && resolvedCompanyId
       ? queryKeys.issues.listByProject(resolvedCompanyId, workspaceTabProjectId)
       : ["issues", "__workspace-tab__", "disabled"],
-    queryFn: () => issuesApi.list(resolvedCompanyId!, { projectId: workspaceTabProjectId! }),
+    queryFn: () => issuesApi.listAll(resolvedCompanyId!, { projectId: workspaceTabProjectId! }),
     enabled: Boolean(resolvedCompanyId && workspaceTabProjectId && isolatedWorkspacesEnabled),
   });
   const {

@@ -7,6 +7,18 @@ event needs no operator endpoint.
 
 ## Native PRP Run-Log Events
 
+`native.recovery.execution_reclaimed` records an atomic same-run recovery claim
+that restores a released task execution binding. The claim locks the task,
+coordinator, and original run in that order. It preserves the assignee and checks
+current execution/checkout owners, other live work, dependencies, pause holds,
+and stop/successor records before restoring the binding. Attachment authorization
+keeps its existing requirement for that exact binding. Skipped retry candidates
+wait 30 seconds before recheck so they cannot fill every bounded claim batch.
+Undated retries sort first. A failed candidate cannot discard earlier committed
+claims. Queued waiters do not block the original execution owner from recovery;
+they still wait for that owner to settle before normal queue promotion.
+This is local run-log data.
+
 Fresh remote Codex model substitution emits `runner.model_fallback` on the
 system stream with `warn` severity. Its payload contains `requestedModel`,
 `effectiveModel`, and `codexCliVersion`. It records a preparation choice before
@@ -279,6 +291,13 @@ also includes time spent queued. `outcome` is the actual terminal status, such a
 settlement record. The record does not imply exactly-once emission across
 controller recovery, and failure to write it is logged without changing the
 already-settled outcome.
+
+## System notices and final replies
+
+Automatic comments with a stored `system_notice` presentation, including
+workspace-ready notices, remain available as progress information. They do not
+occupy the run's final reply slot. Final response selection still preserves
+ordinary explicit agent comments and excludes receipt-bound generated progress.
 
 ## ACP terminal failure diagnostics
 

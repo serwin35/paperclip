@@ -5,7 +5,35 @@ Run-log events write to the `heartbeat_run_events` table
 Paperclip Telemetry events, and they are not OpenTelemetry exports. A run-log
 event needs no operator endpoint.
 
+## Provider-pack preparation timing
+
+The existing `run.performance.span` event also records `provider_pack.select`,
+`provider_pack.discover`, `provider_pack.verify`, `provider_pack.verify_preinstalled`,
+`provider_pack.link_preinstalled`, `provider_pack.clear_stale`, `provider_pack.upload`,
+and `provider_pack.verify_uploaded`. Selection records `stateSource` as `staged`,
+`preinstalled`, or `uploaded`. Its closed reason is `verified_pack_reused` or
+`cached_packs_unverified`. A verification failure describes an unusable candidate;
+it does not identify a particular compatibility mismatch or a failed run.
+Harness startup also records `harness_state.inspect`, `harness_state.path_check`,
+and `harness_state.launch_material` for remote state inspection and fresh launch
+material. These events retain the existing schema and carry no paths or exception strings.
+They also become native Observability spans only with an operator OTLP endpoint.
+
 ## Native PRP Run-Log Events
+
+`auth.credentials.updated` is a runner-produced PRP event for a change to a
+supported credential store, including account identity changes and later token
+refreshes on the new account. The bundled transport awaits a host commit callback
+before acknowledging delivery, including during warm idle and provider cleanup.
+The callback writes directly to the bound run through the shared run-log writer.
+Its separate credential source namespace avoids collisions with driver-normalized
+source sequences and deduplicates retries using the original PRP event identity.
+The original envelope is retained in `prpEvent`. Its payload contains only a
+provider, an opaque binding ID, a revision, and a detection method. It contains
+no credentials, account identity, file path, or credential fingerprint. The
+consumer can use the event to read the updated credentials through its existing
+private credential channel. This run-log event stays in the instance database.
+
 
 `native.recovery.execution_reclaimed` records an atomic same-run recovery claim
 that restores a released task execution binding. The claim locks the task,
@@ -150,6 +178,14 @@ The event never includes bootstrap tickets, reconnect leases, authentication
 proofs, encryption keys, environment variables, provider credentials, command
 arguments, or an unsanitized stderr stream. Detailed failed-attempt diagnostics
 remain in the bounded `native_run_finalizations.recovery_history` ledger.
+
+`native.remote_runner_recovery_failed` records the closed `stage` and `reason`
+when remote identity verification fails, including admission failures before the
+execution coordinator opens. Unavailable probes are retried within a shared
+30-second deadline; identity conflicts are not retried. The event distinguishes
+an unreadable identity from a confirmed missing process and contains no command
+output or credentials. Saved-state read failures use `state_read_failed`; malformed
+saved JSON uses `state_invalid`. It does not itself authorize replacement or cleanup.
 
 For a prepared remote workspace interrupted before its first executor claim,
 that ledger records `remote_execution_never_claimed` with a

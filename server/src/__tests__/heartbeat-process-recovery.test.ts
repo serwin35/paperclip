@@ -3521,7 +3521,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   }
 
-  it("retains the source when a saved native descriptor fails inside runtime selection", async () => {
+  it.each([false, true])("settles a failed saved native descriptor without inventing files when workspace access is disabled: %s", async withoutWorkspace => {
     await withTempPaperclipHome(async () => {
       const f = await seedQueuedIssueRunFixture();
       await db.update(agents).set({ adapterType: "paperclip_runner",
@@ -3547,7 +3547,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
               descriptorSha256: "a".repeat(64), baselineSha256: "b".repeat(64), finalHostSha256: null,
               workspaceId: randomUUID(), leaseId: lease!.id, providerLeaseId: lease!.providerLeaseId!, remoteCwd: "/work", resourceDisposition: "destroy" as const };
             await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: f.issueId, nativePhase: "observed",
-              runnerProfileJson: { nativeWorkspaceSync: reference },
+              driverKind: withoutWorkspace ? "grok_bot_mcp" : null,
+              runnerProfileJson: { nativeWorkspaceSync: reference, ...(withoutWorkspace ? { nativeExecutionInput: {
+                schema: "paperclip.native-execution-input.v6", provider: { kind: "grok_bot" },
+                binding: { companyId: f.companyId, agentId: f.agentId, runId, issueId: f.issueId },
+                workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null },
+              } } : {}) },
             }).where(eq(heartbeatRuns.id, runId));
             await db.insert(nativeRunFinalizations).values({ runId, companyId: f.companyId, issueId: f.issueId, phase: "observed" });
             await nativeWorkspaceSyncInternals.readDescriptor({ companyId: f.companyId, runId, workspaceId: reference.workspaceId, reference });
@@ -3556,15 +3561,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         await heartbeat.resumeQueuedRuns();
         await heartbeat.drainActiveRunExecutions();
         expect(leaseId).toBeDefined();
-        expect(await heartbeat.getRun(f.runId, { includeExecutionEvidence: true })).toMatchObject({ status: "failed",
-          runtimeMode: "native", nativePhase: "terminal_failure", resultJson: {
-            workspaceRestoreFailure: "restore_failed", workspaceRestoreRecovery: { leaseIds: [leaseId] },
-          },
-        });
-        expect(await db.select().from(environmentLeases).where(eq(environmentLeases.id, leaseId!)))
-          .toMatchObject([{ status: "pending_cleanup", leasePolicy: "retain_on_failure" }]);
-        expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ workspaceRepairRequired: true, canRetry: false });
-        expect(release).toHaveBeenCalledWith(expect.objectContaining({ providerResourceDisposition: "stop_and_retain" }));
+        const failed = await heartbeat.getRun(f.runId, { includeExecutionEvidence: true });
+        expect(failed).toMatchObject({ status: "failed", runtimeMode: "native", nativePhase: "terminal_failure" });
+        if (withoutWorkspace) {
+          expect(failed?.resultJson?.workspaceRestoreFailure ?? null).toBeNull();
+          expect(failed?.resultJson?.workspaceRestoreRecovery ?? null).toBeNull();
+          expect((await getExecutionBlocker(db, f.companyId, f.issueId))?.workspaceRepairRequired).not.toBe(true);
+          expect(release).toHaveBeenCalled();
+          expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ providerResourceDisposition: "stop_and_retain" }));
+        } else {
+          expect(failed?.resultJson).toMatchObject({ workspaceRestoreFailure: "restore_failed", workspaceRestoreRecovery: { leaseIds: [leaseId] } });
+          expect(await db.select().from(environmentLeases).where(eq(environmentLeases.id, leaseId!)))
+            .toMatchObject([{ status: "pending_cleanup", leasePolicy: "retain_on_failure" }]);
+          expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ workspaceRepairRequired: true, canRetry: false });
+          expect(release).toHaveBeenCalledWith(expect.objectContaining({ providerResourceDisposition: "stop_and_retain" }));
+        }
         expect(provider).not.toHaveBeenCalled();
         expect(mockAdapterExecute).not.toHaveBeenCalled();
       } finally { factory.mockRestore(); }

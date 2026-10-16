@@ -1,7 +1,9 @@
+import { dotRunnerBroker } from "./dot-runner-broker.js";
+import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase, isWorkspaceSyncDetailPhase } from "./execution-preparation-timing.js";
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
 import { createHeartbeatInstructionCopyRelease, createHeartbeatInstructionWorkingCopy } from "./heartbeat/instruction-working-copy.js";
 import { prepareHeartbeatRuntimeServiceIntents, startHeartbeatRuntimeServices, recordHeartbeatAdapterRuntimeServices } from "./heartbeat/runtime-services.js";
-import { prepareHeartbeatExecutionConfiguration } from "./heartbeat/execution-configuration.js";
+import { bindHeartbeatRunnerHomeMode, prepareHeartbeatExecutionConfiguration } from "./heartbeat/execution-configuration.js";
 import { createHeartbeatRunOutput } from "./heartbeat/run-output.js";
 import { prepareHeartbeatSession, resolveHeartbeatAdapterSession } from "./heartbeat/session-preparation.js";
 import { prepareHeartbeatTaskContext } from "./heartbeat/task-context.js";
@@ -9,6 +11,7 @@ import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
 import { preserveNativeFailedWorkspace } from "./native-runtime/native-failed-workspace-recovery.js";
+import { nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
 import { selectHeartbeatRuntime } from "./heartbeat/runtime-selection.js";
 import { createHeartbeatRunCompletion } from "./heartbeat/run-completion.js";
 export {
@@ -1201,6 +1204,13 @@ export function heartbeatService(
   });
 
   const heartbeatQueue = createHeartbeatQueue(db, {
+    canStartNewExternalBotWork: async agent => {
+      if (agent.adapterType !== "paperclip_runner" || agent.adapterConfig.provider !== "grok_bot") return true;
+      const aiConnection = aiRuntimeConnectionBindingSchema.safeParse(agent.runtimeConfig?.aiConnection);
+      if (aiConnection.success && aiConnection.data.mode === "router") return true;
+      return dotRunnerBroker(db).canStartNewWork(agent.companyId, agent.id,
+        readNonEmptyString(agent.adapterConfig.externalBindingId) ?? "");
+    },
     applyWakeQueuePostCommitEffects,
     setRunStatus,
     setWakeupStatus,
@@ -1796,6 +1806,13 @@ export function heartbeatService(
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
     } = {},
   ) {
+    return withRunExecutionTiming(runId, () => executeRunAttempt(runId, runOptions));
+  }
+
+  async function executeRunAttempt(
+    runId: string,
+    runOptions: { nativeLeaseOwner?: string; nativeRestartRecovery?: NativeRestartRecoveryClaim },
+  ) {
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if ((await getSchedulingSuppression()).suppressed) {
@@ -1940,7 +1957,7 @@ export function heartbeatService(
       const failureRun = await getRun(run.id);
       if (failureRun?.runtimeMode === "native"
         && parseObject(failureRun.runnerProfileJson?.nativeWorkspaceSync).state === "prepared") {
-        providerResourceDispositionForRun = "stop_and_retain";
+        if (!nativeRunHasNoWorkspaceAccess(failureRun)) providerResourceDispositionForRun = "stop_and_retain";
         try {
           await preserveNativeFailedWorkspace(db, failureRun, {
             allowPreterminal: true,
@@ -2469,9 +2486,15 @@ export function heartbeatService(
             taskKey,
           )
         : null;
-      const routerHasPersistedInput = Object.keys(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput)).length > 0;
+      const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+      const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
+      if (agent.adapterType === "paperclip_runner") {
+        const homeConfig = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
+        if ("homeMode" in homeConfig) config = { ...config, homeMode: homeConfig.homeMode };
+      }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;
-      const requestedAiBinding = persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
+      const preconfiguredHome = agent.adapterType === "paperclip_runner" && config.homeMode === "preconfigured";
+      const requestedAiBinding = preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
       let aiBinding = requestedAiBinding?.mode === "router" ? undefined : requestedAiBinding;
       const originalAiIssueOverrides = issueAssigneeOverrides;
       if (requestedAiBinding?.mode === "router") {
@@ -2853,8 +2876,9 @@ export function heartbeatService(
       ) => {
         // Admission can wait for accounting locks. Finish that wait before the
         // final ownership gate, whose callback must enter the adapter directly.
-        const reservation = await reserveRunBudget(db, run.companyId, run.id,
-          readNonEmptyString(runLedgerScope.projectId), runLedgerScope, runOptions.nativeLeaseOwner);
+        const reservation = await measureRunPhase("execution.budget_reservation", () =>
+          reserveRunBudget(db, run.companyId, run.id,
+            readNonEmptyString(runLedgerScope.projectId), runLedgerScope, runOptions.nativeLeaseOwner));
         let entered = false;
         try {
           return await dispatchResolvedInteractionContinuationAfterAdmission((markDispatchStarted) => {
@@ -3303,10 +3327,11 @@ export function heartbeatService(
                 message: "workspace_checkpoint", payload: { phase: "workspace_checkpoint", ...metrics } });
             },
             onPhase: async (name, work) => {
+              if (isWorkspaceSyncDetailPhase(name)) return measureWorkspaceSyncPhase(name, work);
               const started = Date.now();
-              try { return await work(); }
-              finally { await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info",
-                message: name, payload: { phase: name, durationMs: Date.now() - started } }); }
+              try { return await measureWorkspaceSyncPhase(name, work); }
+              finally { await measureRunPhase("workspace_sync.progress", () => appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info",
+                message: name, payload: { phase: name, durationMs: Date.now() - started } })); }
             },
           },
           config: {
@@ -3339,7 +3364,7 @@ export function heartbeatService(
         if (!runtimeSelection.selected) return;
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
-        const execution = await executeHeartbeatRuntime(db, {
+        const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
           run, agent, options,
           task: {
             issueRef,
@@ -3436,7 +3461,7 @@ export function heartbeatService(
             onProviderResourceDisposition: (value) => { providerResourceDispositionForRun = value; },
             onWorkspaceRestoreFailure: (evidence) => { requiredWorkspaceRestoreEvidence = evidence; },
           },
-        });
+        }));
         if (!execution.dispatched) return;
         const { adapterResult } = execution;
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
@@ -3479,7 +3504,7 @@ export function heartbeatService(
           run, agent, issueId, issueRef, executionWorkspace, context, issuesSvc, onLog,
           adapterResult, runtimeServices,
         });
-        await runCompletion.completeRun({
+        await measureRunPhase("completion.run", () => runCompletion.completeRun({
           run, agent, issueId, issueRef, signal: executionControl.controller.signal,
           output: runOutput,
           session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
@@ -3489,7 +3514,7 @@ export function heartbeatService(
           providerTraceCapture: providerTraceCapture !== null,
           onProviderTraceFinalized: () => { providerTraceFinalized = true; },
           issueContext, onLog,
-        });
+        }));
       } catch (err) {
         await persistUsageCaptureFailure?.();
         if (err instanceof NativeControllerDetachedForRestartError) {

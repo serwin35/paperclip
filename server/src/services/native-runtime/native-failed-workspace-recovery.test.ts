@@ -76,6 +76,58 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
       eq(activityLog.action, "issue.workspace_recovery_required")))).toHaveLength(1);
   });
 
+  async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string }; workspace: { access: string } }) => void) {
+    const run = await readRun(f.runId);
+    const input = { schema: "paperclip.native-execution-input.v6",
+      binding: { runId: f.runId, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId },
+      provider: { kind: provider }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
+    change?.(input);
+    const [updated] = await db.update(heartbeatRuns).set({ driverKind: provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp",
+      runnerProfileJson: { ...run.runnerProfileJson, nativeExecutionInput: input } }).where(eq(heartbeatRuns.id, f.runId)).returning();
+    return updated;
+  }
+
+  it.each(["grok_bot", "openai_dot"] as const)("does not invent file recovery for %s admitted without workspace access", async provider => {
+    const f = await seed(), run = await bindExternalInput(f, provider);
+    await preserveNativeFailedWorkspace(db, run);
+    expect((await readRun(f.runId)).resultJson).not.toHaveProperty("workspaceRestoreFailure");
+    expect(await readLease(f.lease.id)).toMatchObject({ status: "active", leasePolicy: "ephemeral" });
+    expect(await actions(f.issueId)).toHaveLength(0);
+  });
+
+  it.each(["run", "company", "agent", "schema", "write_access"])("preserves file safeguards when no-workspace evidence has an invalid %s", async mismatch => {
+    const f = await seed();
+    const run = await bindExternalInput(f, "grok_bot", input => {
+      if (mismatch === "run") input.binding.runId = randomUUID();
+      if (mismatch === "company") input.binding.companyId = randomUUID();
+      if (mismatch === "agent") input.binding.agentId = randomUUID();
+      if (mismatch === "schema") input.schema = "unknown";
+      if (mismatch === "write_access") input.workspace.access = "read_write";
+    });
+    await preserveNativeFailedWorkspace(db, run);
+    expect((await readRun(f.runId)).resultJson).toHaveProperty("workspaceRestoreFailure", "restore_failed");
+    expect(await readLease(f.lease.id)).toMatchObject({ leasePolicy: "retain_on_failure" });
+  });
+
+  it.each(["grok_bot", "openai_dot"] as const)("keeps historical %s inspection holds with an available recovery path", async provider => {
+    const f = await seed();
+    // Reproduce a hold persisted by an older cancellation path, then attach its admitted contract.
+    await preserveNativeFailedWorkspace(db, f.run);
+    const lease = await readLease(f.lease.id);
+    await settleStopOnlyCleanup(db, lease, { attemptId: String(lease.metadata?.pendingCleanupAttemptId),
+      receipt: { providerLeaseId: lease.providerLeaseId, state: "stopped" } });
+    await bindExternalInput(f, provider);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, f.runId));
+    const blocker = await getExecutionBlocker(db, f.companyId, f.issueId);
+    expect(blocker).toMatchObject({ runId: f.runId, canRetry: false, canContinue: false,
+      workspaceRepairRequired: provider !== "grok_bot", canRecordWorkspaceRepair: provider !== "grok_bot" });
+    if (provider === "grok_bot") {
+      expect(blocker?.nextAction).not.toContain("files");
+      expect(blocker?.nextAction).toContain("Runtime");
+    }
+    expect(await actions(f.issueId)).toHaveLength(1);
+  });
+
   it("records verified file repair without retrying the native run or changing its task", async () => {
     const f = await seed();
     await db.update(issues).set({ status: "done", assigneeAgentId: null }).where(eq(issues.id, f.issueId));

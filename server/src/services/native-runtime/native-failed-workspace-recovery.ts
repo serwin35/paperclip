@@ -1,7 +1,7 @@
 import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { recordRequiredWorkspaceRestoreFailure } from "../legacy-execution-recovery.js";
-import { hasRequiredWorkspaceRecovery } from "../workspace-restore-recovery-state.js";
+import { hasRequiredWorkspaceRecovery, nativeRunHasNoWorkspaceAccess } from "../workspace-restore-recovery-state.js";
 import { logActivity } from "../activity-log.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 import type { NativeRestartRecoveryClaim } from "./native-restart-recovery.js";
@@ -45,9 +45,12 @@ export async function preserveNativeFailedWorkspace(db: Db, selected: typeof hea
     )).limit(1);
     if (!source || source.issueId !== issueId || source.metadata?.remoteCwd !== currentReference.remoteCwd
       || (source.executionWorkspaceId && source.executionWorkspaceId !== currentReference.workspaceId)) return;
+    // Ownership settlement still applies to workspace-less external sessions.
+    // Their Runner descriptor is not evidence that user files need exporting.
+    const retainFiles = !nativeRunHasNoWorkspaceAccess(run);
     const alreadyRetained = hasRequiredWorkspaceRecovery(run.resultJson);
-    let retained = alreadyRetained ? run : await recordRequiredWorkspaceRestoreFailure(tx as unknown as Db, run, { workspaceRestoreFailure: "restore_failed" }, source);
-    if (!retained || !hasRequiredWorkspaceRecovery(retained.resultJson)) return;
+    let retained = !retainFiles || alreadyRetained ? run : await recordRequiredWorkspaceRestoreFailure(tx as unknown as Db, run, { workspaceRestoreFailure: "restore_failed" }, source);
+    if (!retained || retainFiles && !hasRequiredWorkspaceRecovery(retained.resultJson)) return;
     if (options.allowPreterminal && coordinator.phase === "observed") {
       const [settled] = await tx.update(nativeRunFinalizations).set({ phase: "terminal_failure",
         leaseOwner: null, leaseExpiresAt: null, controlDeadlineAt: null, nextAttemptAt: null,
@@ -62,7 +65,7 @@ export async function preserveNativeFailedWorkspace(db: Db, selected: typeof hea
       [retained] = await tx.update(heartbeatRuns).set({ nativePhase: "terminal_failure", nativePhaseUpdatedAt: new Date() })
         .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).returning();
     }
-    if (!alreadyRetained) await logActivity(tx as unknown as Db, {
+    if (retainFiles && !alreadyRetained) await logActivity(tx as unknown as Db, {
       companyId: run.companyId, actorType: "system", actorId: "native-workspace-recovery",
       action: "issue.workspace_recovery_required", entityType: "issue",
       entityId: issueId,

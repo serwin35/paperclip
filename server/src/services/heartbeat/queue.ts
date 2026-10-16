@@ -197,6 +197,7 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   runTaskKey: (run: HeartbeatRun) => string | null;
   filterZombieCoalesceTarget: <T extends { id: string; status: string }>(run: T | null, live: { has(id: string): boolean }) => T | null;
   getSchedulingSuppression: () => Promise<{ suppressed: boolean; reason: "worktree_instance" | "database_restore_in_progress" | "task_drain" | null }>;
+  canStartNewExternalBotWork: (agent: typeof agents.$inferSelect) => Promise<boolean>;
   executeRun: (runId: string) => Promise<void>;
   releaseIssueExecutionAndPromote: (run: Pick<HeartbeatRun, "id" | "companyId">, options?: { suppressImmediateRecovery?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] }) => Promise<unknown>;
   applyWakeQueuePostCommitEffects: (effects: WakeQueuePostCommitEffect[]) => Promise<void>;
@@ -372,6 +373,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     cancelActiveForAgentInternal,
     listCompanyAgentOrgRows,
     executeRun,
+    canStartNewExternalBotWork,
     activeRunExecutionPromises,
     activeWakeupPromises,
     instanceSettings,
@@ -985,6 +987,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       );
       return null;
     }
+    if (!run.startedAt && !await canStartNewExternalBotWork(agent)) return null;
 
     const context = parseObject(run.contextSnapshot);
     const budgetBlock = await budgets.getInvocationBlock(
@@ -1942,6 +1945,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         )
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
+      if (queuedRuns.every(run => !run.startedAt) && !await canStartNewExternalBotWork(agent)) return [];
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,

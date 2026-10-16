@@ -204,6 +204,15 @@ function createBroker(db: Db) {
         }
       });
     },
+    async canStartNewWork(companyId: string, agentId: string, bindingId: string): Promise<boolean> {
+      try {
+        await this.snapshot(companyId, agentId, bindingId);
+        return true;
+      } catch (error) {
+        if (error instanceof McpOAuthError) return false;
+        throw error;
+      }
+    },
     async snapshot(companyId: string, agentId: string, bindingId: string): Promise<DotBindingSnapshot> {
       const state = await this.bindingForAgent(companyId, agentId);
       if (!state || !await enabled(state.providerKind)) throw fail("External provider is disabled for new work.");
@@ -248,6 +257,16 @@ function createBroker(db: Db) {
       const authority = await authorizeAssignment({ grant, actor: { type: "agent", companyId, agentId }, company: { id: companyId, name: "", issuePrefix: "", status: "active" } }, assignmentId);
       if (options.requireOffered && authority.assignment.status !== "offered") {
         throw fail("This work was already accepted. Read its feedback and operation receipts without another routine wake.");
+      }
+      if (options.requireOffered && authority.binding.providerKind === "grok_bot") {
+        // A prepared intent from an older dispatcher must not start a second
+        // interaction while the original caller is waiting for admission.
+        const [run] = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.id, authority.assignment.runId), eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId)));
+        const proactive = run?.contextSnapshot?.grokProactiveRequest as Record<string, unknown> | undefined;
+        if (proactive?.bindingId === authority.binding.id && proactive.bindingGeneration === authority.binding.generation) {
+          throw fail("This Bot requested the work. Continue polling its original request instead of starting another routine.");
+        }
       }
       return authority;
     },
@@ -390,13 +409,16 @@ function createBroker(db: Db) {
         if (!assignment) await new Promise(resolve => setTimeout(resolve, 50));
       } while (!assignment && Date.now() < deadline);
       return { ...wake, issueId: task.id, identifier: task.identifier, assignment: assignment ?? null,
-        instruction: wake.status === "admission_failed" ? wake.message : "Drain the inbox now. If assignment is present, read and accept it, then use its catalog. If admission is still pending, retry this provider’s request_turn tool with exactly the same requestId and prompt to check this intake; never create a second request. Events also notify queued work. This intake supplies normal run authority; no human needs to create a preliminary task." };
+        instruction: wake.status === "admission_failed" ? wake.message : `Drain the inbox now. If assignment is present, read and accept it, then use its catalog. If admission is still pending, retry this provider’s request_turn tool with exactly the same requestId and prompt to check this intake; never create a second request. ${b.providerKind === "grok_bot" ? "Queued admission does not start another Grok routine. Keep checking this request from the current conversation until it is admitted or fails." : "Events also notify queued work."} This intake supplies normal run authority; no human needs to create a preliminary task.` };
     },
     async requestWork(principal: McpPrincipal, issueId: string, requestId: string) {
       const b = await principalBinding(principal);
       if (!z.uuid().safeParse(requestId).success) throw fail("Use a stable UUID requestId.");
       if (!await enabled(b.providerKind) || !(await this.bindingForAgent(b.companyId, b.agentId))?.wakeVerified) throw fail("External agent admission is unavailable.");
       const key = `dot-work:${b.id}:${b.generation}:${requestId}`;
+      const admissionMessage = b.providerKind === "grok_bot"
+        ? "Normal admission determines when this task can run. Keep checking the original request with the same request ID and arguments, then read and accept its inbox assignment. Queued admission does not start another Grok routine."
+        : "Normal admission determines when this task can run. Read the mailbox after its event.";
       const receipt = async () => (await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, b.companyId), eq(agentWakeupRequests.agentId, b.agentId), eq(agentWakeupRequests.idempotencyKey, key))).limit(1))[0];
       const replay = async (row: typeof agentWakeupRequests.$inferSelect) => {
         if (row.payload?.issueId !== issueId) throw fail("requestId was reused for another task.");
@@ -407,7 +429,7 @@ function createBroker(db: Db) {
           return { status: "admission_failed", runId: row.runId, admissionStatus: run.status,
             message: "The previous admission ended without an active assignment. Stop waiting for its mailbox event. Inspect the task's run and use normal task recovery after resolving the failure. This request ID retains its original receipt." };
         }
-        return { status: "requested", runId: row.runId, message: "Normal admission determines when this task can run. Read the mailbox after its event." };
+        return { status: "requested", runId: row.runId, message: admissionMessage };
       };
       // A retry is a receipt read, including after the task yielded or finished.
       const old = await receipt();
@@ -424,7 +446,7 @@ function createBroker(db: Db) {
           payload: { issueId, dotRequestId: requestId }, contextSnapshot: { issueId, ...(b.providerKind === "grok_bot" ? { grokProactiveRequest: { requestId, bindingId: b.id, bindingGeneration: b.generation } } : {}) }, idempotencyKey: key, requestedByActorType: "agent", requestedByActorId: b.agentId,
           allowRunCoalescing: false, durableDotRequest: { id: receiptId, companyId: b.companyId, agentId: b.agentId, issueId, requestId, idempotencyKey: key, requestedAt: new Date() } });
         const reserved = await receipt();
-        return reserved ? replay(reserved) : { status: "requested", runId: run?.id ?? null, message: "Normal admission determines when this task can run. Read the mailbox after its event." };
+        return reserved ? replay(reserved) : { status: "requested", runId: run?.id ?? null, message: admissionMessage };
       } catch (error) {
         // A concurrent reservation can lose the PK race on a different task.
         // Replay only that durable receipt; do not mask unrelated failures.

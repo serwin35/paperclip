@@ -1687,7 +1687,25 @@ export interface PluginApprovalsClient {
  * Requires `agents.read` for reads; `agents.pause` / `agents.resume` /
  * `agents.invoke` for write operations.
  */
+export interface PluginAgentRuntimeSkill {
+  key: string;
+  runtimeName: string;
+  source: string;
+  versionId?: string | null;
+  currentVersionId?: string | null;
+  sourceStatus?: "available" | "missing";
+  missingDetail?: string | null;
+}
+
+export interface PluginAgentConnectionAssignments {
+  features: { publicMcp: boolean; chatConnectors: boolean };
+  connections: Array<{ id: string; name: string; transport: string; enabled: boolean; status: string }>;
+  profileIds: string[];
+}
+
 export interface PluginAgentRuntimeState {
+  connectionAssignments: PluginAgentConnectionAssignments;
+  skills: PluginAgentRuntimeSkill[];
   revision: string;
   agent: Agent;
   instructionsRootPath: string | null;

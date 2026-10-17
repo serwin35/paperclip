@@ -65,3 +65,71 @@ revision, so repeated identical saves against that revision create no audit rows
 or events. Later runtime changes invalidate that deduplication. The file API still
 returns `changed: false` for identical content and keeps conditional-write checks.
 Consumers can skip rewriting content whose hash already matches.
+
+## Skills
+
+Migration 0348 invalidates referencing agents when installed skill content,
+companion files, versions, source bindings, or identities change. Rename checks
+both old and new keys. String selections, structured selections, and supported
+legacy aliases are recognized. Unrelated agents and other companies receive no
+content invalidation. Private-source bindings, membership, and privacy changes
+invalidate only agents assigned skills from the affected sources. Project workspace
+authorization-policy changes use the same boundary. Company policy
+changes conservatively invalidate the company.
+Source retry/lease bookkeeping and skill popularity counters do not emit changes.
+Multi-skill source publication defers its skill invalidation until transaction
+commit, after it acquires all skill rows. This avoids an agent-lock/skill-lock
+cycle with concurrent version saves. Individual file edits retain immediate
+journaling and their existing filesystem rollback behavior.
+
+Assignment edits already use the configuration boundary. The runtime reader
+returns selected skill entries with host source paths and immutable version IDs.
+It uses the execution resolver, current agent access, the instance pin flag, and
+legacy operational-skill rules. It performs no upstream refresh. The resolver can
+rebuild an expired version cache from saved bytes. Slow materialization happens
+outside the agent row lock. The reader rechecks ownership and revision afterward;
+it retries concurrent changes three times and then returns a conflict.
+
+Pinned assignments receive conservative content invalidations too. Their resolved
+version and bytes stay pinned when pin support is enabled. Consumers can compare
+versions or destination hashes and avoid rewriting unchanged trees. Task-only
+skill mentions and a running task's saved version selection remain task-owned.
+
+## Standing connection assignments
+
+`getRuntime` also returns `connectionAssignments`: effective `publicMcp` and
+`chatConnectors` feature switches, installed connections with `id`, `name`,
+`transport`, `enabled`, and `status`, and active profile IDs. It includes both
+company assignments and assignments for the requested agent. It excludes other
+agents' assignments and has no credential values, grant details, or tool schemas.
+The owning-plugin checks for the runtime reader apply to this field too.
+
+Migration 0354 records committed changes to every stored field used by this
+snapshot. Agent-targeted installation and profile binding edits invalidate only
+their old and new target agents. Company-targeted assignments invalidate company
+agent runtimes. Project, routine, issue, and gateway bindings are outside this
+snapshot and do not invalidate it. Connection metadata, profile activation or
+removal, and connector feature switches still use conservative company-wide
+invalidation. Empty writes and changes to health bookkeeping do not. Multiple
+assignment statements in one transaction coalesce to one update per agent.
+Journal writes and their triggering changes commit or roll back together.
+Company-wide invalidation remains synchronous: it locks eligible company agents
+in order and journals one update per agent. Its work grows with company size;
+there is no fanout ceiling or cross-transaction mutation quota.
+
+The reader orders and deduplicates assignments. It rejects more than 512
+connections or 128 active profiles with status 422 instead of returning a partial
+snapshot. It rechecks the revision after reading assignments and skills, with the
+same three-attempt conflict behavior described above.
+
+Each delivery-service startup records one company baseline when an enabled
+runtime subscriber becomes active. This covers feature overlays supplied at
+process startup. It does not add a recurring scan. Plugins must compare desired
+state and destination hashes before rewriting external files.
+
+This assignment contract does not yet emit connector-specific invalidations for
+tool catalog contents, profile entries, policies, connection configuration,
+grants, credentials, or endpoint configuration. Those inputs need their own
+mutation coverage before a consumer can rely on their immediate synchronization.
+Existing agent and skill invalidations still apply independently. Standing
+assignments express desired state; they do not prove task-specific authorization.

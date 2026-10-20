@@ -1,3 +1,5 @@
+import { agentObservabilityService } from "./agent-observability.js";
+import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import type { Db } from "@paperclipai/db";
 import { eq, inArray } from "drizzle-orm";
 import { createAgentLifecycle, scheduleAgentLifecycle } from "./agent-lifecycle.js";
@@ -34,6 +36,7 @@ import {
   principalPermissionGrants,
   companyMemberships,
   companySkills,
+  cases,
   documents,
   routineRuns,
   routineTriggers,
@@ -48,13 +51,14 @@ export async function deleteCompany(db: Db, id: string) {
     await lifecycle.terminateAgent(agent.id);
     await scheduleAgentLifecycle(db, agent.id);
   }
-  return db.transaction(async (tx) => {
+  return withAccountHomeSecretMutationLock(undefined, id, () => db.transaction(async (tx) => {
         // Exclude accounting writers before taking child locks. KEY SHARE must
         // remain compatible: native writers can already hold a child row while
         // saving a company-scoped result. FOR UPDATE would deadlock that save.
         const [existing] = await tx.select({ id: companies.id }).from(companies)
           .where(eq(companies.id, id)).for("no key update");
         if (!existing) return null;
+        await agentObservabilityService(tx as unknown as Db).removeForCompanyDeletion(id);
         // Finance can reference costs and both can reference runs. Incidents
         // reference policies and approvals; delete these dependents first.
         await tx.delete(financeEvents).where(eq(financeEvents.companyId, id));
@@ -62,6 +66,9 @@ export async function deleteCompany(db: Db, id: string) {
         await tx.delete(costEvents).where(eq(costEvents.companyId, id));
         await tx.delete(budgetIncidents).where(eq(budgetIncidents.companyId, id));
         await tx.delete(budgetPolicies).where(eq(budgetPolicies.companyId, id));
+        // Cases retain task and agent references. Their dependent handoffs and
+        // access sources cascade here before those task/agent records are removed.
+        await tx.delete(cases).where(eq(cases.companyId, id));
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })
@@ -108,5 +115,5 @@ export async function deleteCompany(db: Db, id: string) {
           .where(eq(companies.id, id))
           .returning();
         return rows[0] ?? null;
-      });
+      }));
 }

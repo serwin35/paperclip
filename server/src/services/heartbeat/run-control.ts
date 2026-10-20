@@ -1,14 +1,21 @@
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
+import { pendingCaseHandoffForRun, cancelCaseHandoffsForIssue, isCaseHandoffSourceReleased } from "./case-handoff-lifecycle.js";
+import { publishActivity, type ActivityPublication } from "../activity-log.js";
 import { DEFERRED_WAKE_CONTEXT_KEY } from "./queue.js";
 import { CANCELLABLE_HEARTBEAT_RUN_STATUSES } from "./recovery.js";
 import {
   type WakeupOptions,
 } from "./run-preparation.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
+import { hasRequiredWorkspaceRecovery, nativeRunHasNoWorkspaceAccess } from "../workspace-restore-recovery-state.js";
+import { preserveNativeFailedWorkspace } from "../native-runtime/native-failed-workspace-recovery.js";
+import { readNativeWorkspaceSyncReference } from "../native-runtime/native-workspace-sync.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import {
   nativeRetryCancellationCommitCondition,
+  nativeRetryCancellationEligible,
   claimCancellationRequest,
+  rethrowNativeCancellationLockConflict,
 } from "../native-runtime/native-cancellation-request.js";
 import {
   canContinueCancelledRun,
@@ -230,6 +237,8 @@ function readNonEmptyString(value: unknown): string | null {
 }
 
 export type CancelRunOptions = {
+    /** Return null if a parked retry was promoted or settled before this cancellation. */
+    expectedStatus?: "scheduled_retry";
     budgetEnforcement?: BudgetEnforcementScope;
     /** Optional board request identity, atomically reserved for native Stop. */
     cancellationRequestId?: string;
@@ -288,10 +297,24 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // Recovery can finish workspace copy-back outside the executor's finally.
     // Successful copy-back does not earn warm retention for a failed turn.
     const status = leaseOwnerRun?.status ?? input.status;
-    const providerResourceDisposition = providerResourceDispositionForTerminalRun(
+    let providerResourceDisposition = providerResourceDispositionForTerminalRun(
       input.providerResourceDisposition,
       status,
     );
+    if (leaseOwnerRun?.runtimeMode === "native" && status === "cancelled"
+      && readNativeWorkspaceSyncReference(leaseOwnerRun.runnerProfileJson?.nativeWorkspaceSync)?.state === "prepared"
+      && !nativeRunHasNoWorkspaceAccess(leaseOwnerRun)) {
+      try {
+        const preserved = await preserveNativeFailedWorkspace(db, leaseOwnerRun, { allowPreterminal: true });
+        if (!preserved || !hasRequiredWorkspaceRecovery(preserved.resultJson)) return;
+      } catch {
+        // Keep the active source eligible for the bounded retention sweep.
+        // Teardown must not release it after retention lost a lock or DB write.
+        logger.warn({ runId: input.runId }, "Deferred cancelled workspace teardown until file retention is recorded");
+        return;
+      }
+      providerResourceDisposition = "stop_and_retain";
+    }
     if (providerResourceDisposition === "destroy") {
       const closeResult = await (
         options.closeWarmNativeSessionsForRun ??
@@ -687,17 +710,19 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
 
   async function releaseIssueExecutionAndPromote(
     run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">,
-    options: { suppressImmediateRecovery?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] } = {},
+    options: { suppressImmediateRecovery?: boolean; resumeStrandedQueue?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] } = {},
   ) {
     try {
       const source = await getRun(run.id);
+      const sourceHandoff = await pendingCaseHandoffForRun(db, run.id, run.companyId);
       const { postCommitEffects } = await wakeQueue.releaseIssueExecution({
         companyId: run.companyId,
         runId: run.id,
         now: new Date(),
         // A durable authentication card owns recovery. This covers the review path,
         // while continuation classification blocks periodic generic retries.
-        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source),
+        suppressImmediateRecovery: options.suppressImmediateRecovery || isAiAuthenticationBlocked(source) || Boolean(sourceHandoff),
+        ...(options.resumeStrandedQueue ? { resumeStrandedQueue: true } : {}),
       });
       if (options.deferredPostCommitEffects) {
         options.deferredPostCommitEffects.push(...postCommitEffects);
@@ -707,6 +732,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       const completed = await getRun(run.id);
       const issueId = readNonEmptyString(completed?.contextSnapshot?.issueId)
         ?? readNonEmptyString(completed?.contextSnapshot?.taskId) ?? completed?.nativeIssueId;
+      if (sourceHandoff && completed?.status === "cancelled" && !completed.startedAt && issueId) {
+        // A cancelled queue entry has no executeRun.finally. The canonical
+        // bootstrap proof still needs to release and wake its durable handoff.
+        await isCaseHandoffSourceReleased(db, { runId: completed.id, issueId });
+      }
       if (completed?.status === "succeeded" && issueId) {
         await settleSlackConversation(db, run.companyId, issueId).catch((err) => {
           logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
@@ -881,7 +911,73 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   ) {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
-    if (options.cancellationRequestId) {
+    if (options.expectedStatus && run.status !== options.expectedStatus) return null;
+    const handoffIssueId = run.nativeIssueId ?? run.issueId ?? (typeof run.contextSnapshot?.issueId === "string" ? run.contextSnapshot.issueId : null);
+    const supersedesCaseHandoff = options.resultJson?.cancelledByActorType === "user" || options.errorCode === "issue_reassigned";
+    let cancellationClaimed = false;
+    let caseHandoffRetryClaimed = false;
+    if (handoffIssueId && supersedesCaseHandoff && options.resultJson?.caseHandoffYieldStop !== true) {
+      const publications: ActivityPublication[] = [];
+      const supersessionApplied = await db.transaction(async tx => {
+        const [issue] = await tx.select({ id: issues.id, executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId,
+          assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId }).from(issues)
+          .where(and(eq(issues.companyId, run!.companyId), eq(issues.id, handoffIssueId))).for("update");
+        const [current] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId),
+          eq(heartbeatRuns.companyId, run!.companyId))).for("update");
+        if (!current || (options.expectedStatus && current.status !== options.expectedStatus)) return false;
+        run = current;
+        if (options.cancellationRequestId) {
+          run = await claimCancellationRequest(tx as unknown as Db, runId, run!.companyId, options.cancellationRequestId,
+            options.cancellationRequestedByUserId ?? null);
+          cancellationClaimed = true;
+        }
+        // Acceptance takes task -> run locks too. Revoke the source's write
+        // authority in the same commit that cancels its outstanding intents,
+        // before waiting for process/native Stop. Otherwise a handoff can be
+        // accepted in the gap after this cancellation sweep.
+        const currentRun = run!;
+        const cancellableStatuses: string[] = options.expectedStatus ? [options.expectedStatus] : [...CANCELLABLE_HEARTBEAT_RUN_STATUSES];
+        if (!options.expectedStatus && currentRun.runtimeMode === "native" && currentRun.status === "failed" && currentRun.nativeIssueId) {
+          // Failed native runs may still own a retry. As in correlated Stop,
+          // lock the coordinator NOWAIT so a coordinator-only writer wins
+          // safely instead of deadlocking with its run-row claim.
+          const [coordinator] = await tx.select().from(nativeRunFinalizations).where(and(
+            eq(nativeRunFinalizations.runId, runId), eq(nativeRunFinalizations.companyId, currentRun.companyId),
+            eq(nativeRunFinalizations.issueId, currentRun.nativeIssueId))).for("update", { noWait: true }).limit(1);
+          caseHandoffRetryClaimed = nativeRetryCancellationEligible({ runId, companyId: currentRun.companyId,
+            issueId: currentRun.nativeIssueId, resultJson: currentRun.resultJson, requestId: options.cancellationRequestId }, coordinator);
+          if (caseHandoffRetryClaimed) cancellableStatuses.push("failed");
+        }
+        const requestedAt = new Date().toISOString();
+        const guardedCancellation = options.expectedStatus ? {
+          cancellation: (currentRun.resultJson?.startupCancellation ? readRunCancellation(currentRun.resultJson) : null)
+            ?? requestedRunCancellation(options.resultJson ?? {}, reason),
+          // Promotion must remain fenced after this transaction releases the
+          // run lock, before the ordinary Stop path performs its settlement.
+          startupCancellation: { requestedAt, beforeNativeSelection: currentRun.runtimeMode === "legacy" && !currentRun.runtimeModeResolvedAt
+            && currentRun.executionStage === "preparing" && parseObject(currentRun.runnerProfileJson?.adapterDispatch).adapterType === "paperclip_runner" },
+        } : {};
+        const [fenced] = await tx.update(heartbeatRuns).set({
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+            executionCancellation: { state: "requested", requestedAt }, ...guardedCancellation,
+          })}::jsonb`,
+        }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, run!.companyId),
+          inArray(heartbeatRuns.status, cancellableStatuses))).returning();
+        if (options.expectedStatus && !fenced) return false;
+        if (fenced) run = fenced;
+        // A board terminal request deliberately has no source run. It belongs
+        // to the current task execution, not whichever historical run is stopped.
+        // Queue admission may bind execution before adopting an old checkout.
+        const ownsTask = issue && issue.assigneeAgentId === currentRun.agentId && !issue.assigneeUserId &&
+          (issue.executionRunId ? issue.executionRunId === runId : issue.checkoutRunId === runId);
+        await cancelCaseHandoffsForIssue(tx as unknown as Db, { companyId: run!.companyId, issueId: handoffIssueId,
+          sourceRunId: runId, includeUnboundTerminalIntent: Boolean(fenced && ownsTask), reason, publications });
+        return true;
+      }).catch(rethrowNativeCancellationLockConflict);
+      publications.forEach(publishActivity);
+      if (!supersessionApplied) return null;
+    }
+    if (options.cancellationRequestId && !cancellationClaimed) {
       run = await claimCancellationRequest(db, runId, run.companyId, options.cancellationRequestId, options.cancellationRequestedByUserId ?? null);
     }
     // The caller claim checked retry eligibility under both durable row locks.
@@ -890,7 +986,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // retry fence. Re-reading only retryable_failure here would strand replay.
     const pendingNativeRetry =
       run.runtimeMode === "native" && run.status === "failed" && (
-        Boolean(options.cancellationRequestId) || await db
+        caseHandoffRetryClaimed || Boolean(options.cancellationRequestId) || await db
           .select({ runId: nativeRunFinalizations.runId })
           .from(nativeRunFinalizations)
           .where(
@@ -911,7 +1007,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       return run;
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
-    const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
+    const cancellation = (options.expectedStatus && run.resultJson?.startupCancellation
+      ? readRunCancellation(run.resultJson) : null) ?? requestedRunCancellation(options.resultJson ?? {}, reason);
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -934,7 +1031,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // Established legacy processes must still be stopped if the database is
     // unavailable. Only native or not-yet-dispatched preparation needs this
     // additional durable fence before its existing cancellation path.
-    if (options.budgetEnforcement || (!options.cancellationRequestId && (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control)))) {
+    if (options.expectedStatus || options.budgetEnforcement || (!options.cancellationRequestId && (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control)))) {
       const fence = async (tx: Db) => {
         const [fenced] = await tx.update(heartbeatRuns).set({
           // Record handoff intent before native cancellation can finalize and release
@@ -945,13 +1042,14 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
             ${JSON.stringify({ cancellation })}::jsonb ||
             jsonb_build_object('startupCancellation', jsonb_build_object(
               'requestedAt', ${new Date().toISOString()}::text,
+              'errorCode', ${errorCode}::text,
               'beforeNativeSelection', ${heartbeatRuns.runtimeMode} = 'legacy'
                 and ${heartbeatRuns.runtimeModeResolvedAt} is null
                 and ${heartbeatRuns.executionStage} = 'preparing'
                 and coalesce(${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'paperclip_runner', false)
             ))`,
         }).where(and(eq(heartbeatRuns.id, runId), inArray(heartbeatRuns.status,
-          pendingNativeRetry ? [...CANCELLABLE_HEARTBEAT_RUN_STATUSES, "failed"] : [...CANCELLABLE_HEARTBEAT_RUN_STATUSES],
+          options.expectedStatus ? [options.expectedStatus] : pendingNativeRetry ? [...CANCELLABLE_HEARTBEAT_RUN_STATUSES, "failed"] : [...CANCELLABLE_HEARTBEAT_RUN_STATUSES],
         ))).returning();
         return fenced ?? null;
       };
@@ -966,7 +1064,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       }
       if (!fenced) {
         stopOwnership?.release();
-        return getRun(runId);
+        return options.expectedStatus ? null : getRun(runId);
       }
       run = fenced;
     }

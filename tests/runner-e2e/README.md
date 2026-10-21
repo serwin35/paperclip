@@ -1,5 +1,46 @@
 # Paid runner full-stack E2E
 
+## Latency observation bounds
+
+The explicit `codie-latency-diagnostic` arms its observation recorder before
+dispatching task creation and measures elapsed time with `performance.now()`.
+The first browser read starts before dispatch; subsequent reads run every 100 ms
+without overlapping. The observer stops and drains before fixture teardown,
+with one one-second deadline for its pending and final reads. On expiry, it
+records `observationTimeouts` and a failed observation for each waiting probe,
+starts no more reads, and ignores late completions. Fixture cleanup owns the
+browser operation that can still be running after that deadline.
+It retains `latencyProbes` in the existing result JSON and dashboard, separately
+for the first visible substantive response and final task/run settlement, with
+an inclusive 30-second target. Platform-generated receipts do not count as the
+substantive response. Browser polls bound persistent visible output; this does
+not measure Slack delivery or qualify transient output between observations.
+These timing verdicts are diagnostic dimensions and do not replace the existing
+workflow matchers or rewrite the original attempt grade.
+
+`latency-timing.ts` is shared by response and acknowledgement timing evidence.
+The browser adapter samples both from one snapshot when an acknowledgement
+target is explicitly configured; the Daytona diagnostic does not enable that
+feature or infer a missing Slack acknowledgement from its browser observations.
+An absent observation and a present observation give `(lastAbsent, firstPresent]`;
+an asynchronous absent read uses its start time, while a present read uses its
+completion time. Each bound is widened by the declared clock resolution.
+Targets specify `<` or `<=`; open and closed endpoints determine equality.
+Pass requires the entire interval to satisfy the target, fail requires the
+entire interval to violate it, and all other cases are inconclusive. Missing
+observations remain null; unknown resolution and invalid/empty intervals cannot
+produce a conclusive verdict. Failed reads are not absent observations.
+
+The historical acknowledgement `(1901, 2427] ms` is inconclusive against
+`<= 2000 ms`; the reply `(52965, 53334] ms` fails `<= 30000 ms`. These are
+deterministic calibration examples, not fresh live measurements. Provider
+message creation/edit timestamps remain separate metadata; an edit can expose
+new response text on an older message. Neither those timestamps nor final run
+settlement substitutes for first visible response. The legacy warm-turn
+`responseLatencyMs` field continues to mean final settlement and is labelled
+accordingly. Report regeneration recomputes interval verdicts, retains changed
+`recordedVerdict` values and all bounds, and leaves the original files intact.
+
 ## Live provider connection journeys
 
 See [PROVIDER-CONNECTIONS.md](PROVIDER-CONNECTIONS.md) for the explicit-only
@@ -778,15 +819,19 @@ captures remain failed evidence; qualifying a fix requires a new live attempt.
 
 Every completed local campaign also writes
 `tests/runner-e2e/results/<campaign>/dashboard.html`. The self-contained page
-shows the complete profile/environment grid with screenshot thumbnails.
+shows every selected execution with screenshot thumbnails, grouped by suite and case.
 The history homepage and campaign report render their campaign summaries as
 selectable HTML text, with suite links, pass counts, status, and timing.
 Campaign reports render only selected executions, including selected cases with
 missing evidence or startup failures. Search and feature/suite/profile filters
-replace the full-catalog sticky index.
-Each suite in the campaign report summary folds open to a list of its selected cases.
-The same case links appear at the start of the suite, with a return to the top
-index. Cases appear once across agent/environment configurations; links prefer
+sit alongside a folding suite/case sidebar scoped to the current campaign.
+Global Overview, Campaign history, and Needs attention pages have no suite tree.
+All results is one continuous report with an overview and all execution previews.
+Suite links jump into the report; sidebar case links open a focused case view
+with a configuration picker. Clickable Campaign / Suite / Case breadcrumbs
+return to the report and preserve its reading position. Suite contents also link
+to execution previews, with a return to the overview and a bottom-right Back to top.
+Cases appear once in the index across agent/environment configurations; links prefer
 a result matching the active filters and clear conflicting filters when needed
 to reveal their destination.
 Case links show a green status dot when all matching configurations passed,

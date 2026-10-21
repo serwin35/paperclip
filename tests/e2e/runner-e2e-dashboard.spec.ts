@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { runnerExecutionById, runnerMatrix } from "../runner-e2e/catalog.js";
 import {
@@ -7,6 +7,13 @@ import {
 } from "../runner-e2e/dashboard.js";
 import { buildRunnerCampaign } from "../runner-e2e/history.js";
 import type { MatrixExecution, RunnerE2EResult } from "../runner-e2e/types.js";
+
+const reportUrl = "http://runner-e2e.test/campaign/";
+
+async function openReport(page: Page, report: string) {
+  await page.route(`${reportUrl}**`, (route) => route.fulfill({ contentType: "text/html", body: report }));
+  await page.goto(reportUrl);
+}
 
 const executionIds = [
   "core-compatibility.legacy-codex.local.message-marker",
@@ -66,14 +73,15 @@ function resultFor(
   };
 }
 
-test("filters matrix results and pages through the filtered screenshot gallery", async ({
+test("filters execution previews and pages through the filtered screenshot gallery", async ({
   page,
 }) => {
   const catalog = executionIds.map(runnerExecutionById);
   const entries = catalog.map((execution, index) =>
     resultFor(execution, index === 1 ? "failed" : "passed"),
   );
-  await page.setContent(
+  await openReport(
+    page,
     renderRunnerE2EDashboard({
       title: "Runner E2E interaction fixture",
       generatedAt: "2026-09-05T12:01:00.000Z",
@@ -92,7 +100,7 @@ test("filters matrix results and pages through the filtered screenshot gallery",
   await expect(page.locator('select[data-report-suite] option')).toHaveCount(3);
   await expect(page.locator('select[data-report-profile] option')).toHaveCount(4);
   await expect(page.locator("[data-report-result]")).toHaveText(
-    "4 of 4 tests shown",
+    "4 of 4 executions shown",
   );
   await expect(page.locator("[data-gallery-item]")).toHaveCount(4);
   const passedCard = page.locator('[data-execution-id="core-compatibility.legacy-codex.local.message-marker"]');
@@ -110,32 +118,23 @@ test("filters matrix results and pages through the filtered screenshot gallery",
   await page.locator('.feature-coverage').getByRole('button', { name: 'Questions and approvals', exact: true }).click();
   await expect(page.locator('select[data-report-feature]')).toHaveValue('questions-and-approvals');
   await expect(page.locator('.feature-coverage')).not.toHaveAttribute('open');
-  await expect(page.locator('[data-report-result]')).toHaveText('1 of 4 tests shown');
+  await expect(page.locator('[data-report-result]')).toHaveText('1 of 4 executions shown');
   await expect(page.locator('.suite-section:visible')).toHaveCount(1);
   await expect(page.locator('[data-gallery-open]')).toHaveText('View gallery · 1');
   await page.setViewportSize({ width: 900, height: 900 });
-  await expect(page.locator('[data-report-profile-row]:visible')).toHaveCount(1);
+  await expect(page.locator('.execution-preview:visible')).toHaveCount(1);
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.locator('[data-report-reset]').click();
 
-  const firstTable = page.locator(".matrix").first();
-  const widthsBefore = await firstTable
-    .locator("thead th")
-    .evaluateAll((cells) =>
-      cells.map((cell) => cell.getBoundingClientRect().width),
-    );
-  await firstTable.locator("details summary").first().click();
-  const widthsAfter = await firstTable
-    .locator("thead th")
-    .evaluateAll((cells) =>
-      cells.map((cell) => cell.getBoundingClientRect().width),
-    );
-  expect(widthsAfter).toEqual(widthsBefore);
+  const widthBefore = await passedCard.evaluate((card) => card.getBoundingClientRect().width);
+  await passedCard.locator(".case-diagnostics > summary").click();
+  const widthAfter = await passedCard.evaluate((card) => card.getBoundingClientRect().width);
+  expect(widthAfter).toBe(widthBefore);
   await expect(passedCard.locator(".billing-strip")).toBeVisible();
 
   await page.locator("[data-report-query]").fill("Legacy Claude");
   await expect(page.locator("[data-report-result]")).toHaveText(
-    "1 of 4 tests shown",
+    "1 of 4 executions shown",
   );
   await expect(page.locator("[data-gallery-open]")).toHaveText(
     "View gallery · 1",
@@ -147,7 +146,7 @@ test("filters matrix results and pages through the filtered screenshot gallery",
     .locator("select[data-report-profile]")
     .selectOption("legacy-codex");
   await expect(page.locator("[data-report-result]")).toHaveText(
-    "2 of 4 tests shown",
+    "2 of 4 executions shown",
   );
   await expect(page.locator("[data-gallery-open]")).toHaveText(
     "View gallery · 2",
@@ -206,13 +205,11 @@ function navigationReport(ids: readonly string[], suppliedEntries?: readonly Run
 
 test("suite links reveal filtered sections and scroll on repeated clicks", async ({ page }) => {
   const report = navigationReport(executionIds);
-  const reportUrl = "http://runner-e2e.test/campaign/";
-  await page.route(reportUrl, (route) => route.fulfill({ contentType: "text/html", body: report }));
-  await page.goto(reportUrl);
+  await openReport(page, report);
 
   const core = page.locator("#suite-core-compatibility");
   const coreHeading = core.getByRole("heading", { name: "Core Runner Compatibility", exact: true });
-  const coreLink = page.getByRole("link", { name: "Core Runner Compatibility", exact: true });
+  const coreLink = page.locator('[data-nav-suite-link="core-compatibility"]');
   const backToTop = page.getByRole("link", { name: "Back to top", exact: true });
   await expect(backToTop).toBeHidden();
   const feature = page.locator("select[data-report-feature]");
@@ -223,8 +220,8 @@ test("suite links reveal filtered sections and scroll on repeated clicks", async
     await expect(core).toBeVisible();
     await expect(coreHeading).toBeInViewport();
     await expect(feature).toHaveValue("");
-    await expect(page).toHaveURL(`${reportUrl}#suite-core-compatibility`);
-    await expect(page.locator("[data-report-result]")).toHaveText("4 of 4 tests shown");
+    await expect(page).toHaveURL(`${reportUrl}?view=all#suite-core-compatibility`);
+    await expect(page.locator("[data-report-result]")).toHaveText("4 of 4 executions shown");
   }
 
   await page.locator("select[data-report-profile]").selectOption("legacy-codex");
@@ -241,7 +238,7 @@ test("suite links reveal filtered sections and scroll on repeated clicks", async
   await expect(page.locator("select[data-report-profile]")).toHaveValue("legacy-codex");
   await coreLink.click();
 
-  await page.getByRole("link", { name: "Local Session Integrity", exact: true }).click();
+  await page.locator('[data-nav-suite-link="local-session-integrity"]').click();
   await expect(page.locator("#suite-local-session-integrity")).toBeVisible();
   await feature.selectOption("questions-and-approvals");
   await page.goBack();
@@ -249,50 +246,69 @@ test("suite links reveal filtered sections and scroll on repeated clicks", async
   await expect(feature).toHaveValue("");
 });
 
-test("folds the suite index and links each case to a matching configuration", async ({ page }) => {
+test("folds the suite tree, inspects configurations, and returns to the scrolling report", async ({ page }) => {
   const ids = [...executionIds, "core-compatibility.legacy-codex.local.ask-question"];
-  const reportUrl = "http://runner-e2e.test/campaign/";
-  await page.route(reportUrl, (route) => route.fulfill({ contentType: "text/html", body: navigationReport(ids) }));
-  await page.goto(reportUrl);
-  const coreIndex = page.locator(".campaign-suite-details").filter({
-    has: page.getByRole("link", { name: "Core Runner Compatibility", exact: true }),
-  });
+  await openReport(page, navigationReport(ids));
+  const coreIndex = page.locator('[data-nav-suite="core-compatibility"]');
+  const coreLink = coreIndex.locator('[data-nav-suite-link]');
   await expect(coreIndex).not.toHaveAttribute("open");
-  await coreIndex.getByRole("link", { name: "Core Runner Compatibility", exact: true }).click();
-  await expect(coreIndex).not.toHaveAttribute("open");
+  await coreLink.click();
+  await expect(coreIndex).toHaveAttribute("open");
   await coreIndex.locator("summary").focus();
   await page.keyboard.press("Enter");
+  await expect(coreIndex).not.toHaveAttribute("open");
+  await page.keyboard.press("Enter");
   await expect(coreIndex).toHaveAttribute("open");
-  await expect(coreIndex.locator(".suite-case-list a")).toHaveCount(2);
+  await expect(coreIndex.locator("[data-nav-case]")).toHaveCount(2);
   const sectionToc = page.locator("#suite-core-compatibility .suite-case-toc");
   await expect(sectionToc.locator(".suite-case-list a")).toHaveCount(2);
 
   const basicLink = coreIndex.getByRole("link", { name: "Basic response", exact: true });
   const profile = page.locator("select[data-report-profile]");
   const feature = page.locator("select[data-report-feature]");
+  const crumbs = page.getByRole("navigation", { name: "Breadcrumb", exact: true });
+  const returnToCampaign = crumbs.getByRole("link", { name: "navigation-fixture", exact: true });
   await profile.selectOption("legacy-claude");
-  const claudeResult = page.locator('[data-execution-id="core-compatibility.legacy-claude.local.message-marker"]');
+  const readingPosition = await page.evaluate(() => window.scrollY);
   await basicLink.click();
-  await expect(claudeResult.locator(".case-heading")).toBeInViewport();
+  const claudeResult = page.locator('[data-execution-id="core-compatibility.legacy-claude.local.message-marker"]');
+  await expect(claudeResult).toBeVisible();
+  await expect(page.locator("[data-report-case]:visible")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Legacy Claude · Isolated local", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".report-filters")).toBeHidden();
+  expect(new URL(page.url()).searchParams.get("view")).toBe("case");
+  expect(new URL(page.url()).hash).toBe("#execution-core-compatibility.legacy-claude.local.message-marker");
+  await returnToCampaign.click();
   await expect(profile).toHaveValue("legacy-claude");
-  await expect(page).toHaveURL(`${reportUrl}#execution-core-compatibility.legacy-claude.local.message-marker`);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(readingPosition);
 
-  for (let click = 0; click < 2; click += 1) {
-    await feature.selectOption("questions-and-approvals");
-    await basicLink.click();
-    await expect(feature).toHaveValue("");
-    await expect(profile).toHaveValue("");
-    await expect(page.locator('[data-execution-id="core-compatibility.legacy-codex.local.message-marker"] .case-heading')).toBeInViewport();
-  }
+  await feature.selectOption("questions-and-approvals");
+  await basicLink.click();
+  await expect(page.locator('[data-execution-id="core-compatibility.legacy-codex.local.message-marker"]')).toBeVisible();
+  await expect(page.locator("[data-nav-configuration]:visible")).toHaveCount(3);
+  await crumbs.getByRole("link", { name: "Core Runner Compatibility", exact: true }).click();
+  await expect(feature).toHaveValue("");
+  await expect(profile).toHaveValue("");
+  await expect(page.locator("[data-report-case]:visible")).toHaveCount(5);
   await sectionToc.getByRole("link", { name: "Ask mode question", exact: true }).click();
   await expect(page.locator('[data-execution-id="core-compatibility.legacy-codex.local.ask-question"] .case-heading')).toBeInViewport();
-  await sectionToc.getByRole("link", { name: "Back to index", exact: false }).click();
-  await expect(coreIndex.locator("summary")).toBeInViewport();
+  await sectionToc.getByRole("link", { name: "Back to overview", exact: false }).click();
+  await expect(page.locator("#overview")).toBeInViewport();
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(coreIndex).toBeHidden();
+  await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await expect(basicLink).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await basicLink.click();
+  await expect(coreIndex).toBeHidden();
+  const daytona = page.getByRole("button", { name: "Legacy Codex · Daytona sandbox", exact: true });
+  await daytona.click();
+  await page.reload();
+  await expect(daytona).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('[data-execution-id="core-compatibility.legacy-codex.daytona.message-marker"]')).toBeVisible();
+  await expect(page.locator("[data-report-case]:visible")).toHaveCount(1);
+  await crumbs.getByRole("link", { name: "Core Runner Compatibility", exact: true }).click();
   const backToTop = page.getByRole("link", { name: "Back to top", exact: true });
   await expect(backToTop).toBeVisible();
   expect(await backToTop.evaluate((element) => {
@@ -306,28 +322,31 @@ test("folds the suite index and links each case to a matching configuration", as
 test("case status dots summarize matching results and open failures", async ({ page }) => {
   const ids = [...executionIds, "core-compatibility.legacy-codex.local.ask-question"];
   const entries = executionIds.map((id, index) => resultFor(runnerExecutionById(id), index === 1 ? "failed" : "passed"));
-  const reportUrl = "http://runner-e2e.test/campaign/";
-  await page.route(reportUrl, (route) => route.fulfill({ contentType: "text/html", body: navigationReport(ids, entries) }));
-  await page.goto(reportUrl);
+  await openReport(page, navigationReport(ids, entries));
   const toc = page.locator("#suite-core-compatibility .suite-case-toc");
   const basic = toc.getByRole("link", { name: "Basic response", exact: true });
   const missing = toc.getByRole("link", { name: "Ask mode question", exact: true });
-  const topLink = page.locator('.campaign-case-index [data-report-case-link="core-compatibility.message-marker"]');
+  const topLink = page.locator('.report-suite-tree [data-report-case-link="core-compatibility.message-marker"]');
   await expect(basic).toHaveAttribute("data-case-status", "failed");
   await expect(topLink).toHaveAttribute("data-case-status", "failed");
-  await expect(basic).toHaveAccessibleDescription("Failed · 2/3 passed · 1 failed — All configurations");
+  await expect(basic).toHaveAccessibleDescription("failed · 2/3 configurations passed");
   await expect(missing).toHaveAttribute("data-case-status", "missing");
-  await expect(missing).toHaveAttribute("title", "Missing result · 0/1 passed · 1 missing — All configurations");
+  await expect(missing).toHaveAttribute("title", "missing · 0/1 configurations passed");
   const red = await basic.locator(".case-status-dot").evaluate((element) => getComputedStyle(element).backgroundColor);
 
   const profile = page.locator("select[data-report-profile]");
   await profile.selectOption("legacy-claude");
   await expect(basic).toHaveAttribute("data-case-status", "passed");
   await expect(topLink).toHaveAttribute("data-case-status", "passed");
-  await expect(basic).toHaveAccessibleDescription("Passed · 1/1 passed — Matching configurations");
+  await expect(basic).toHaveAccessibleDescription("passed · 1/1 configurations passed");
   const green = await basic.locator(".case-status-dot").evaluate((element) => getComputedStyle(element).backgroundColor);
   expect(green).not.toBe(red);
-  await expect(missing).toHaveAttribute("title", /none match current filters/);
+  await expect(missing).toHaveAttribute("title", /no matching configurations/);
+  await page.locator('[data-report-journey="core-compatibility.message-marker"]').getByRole("link", { name: "Inspect case ↗", exact: true }).click();
+  await expect(page.locator('[data-execution-id="core-compatibility.legacy-claude.local.message-marker"]')).toBeVisible();
+  await expect(page.locator("[data-report-case]:visible")).toHaveCount(1);
+  await expect(topLink).toHaveAttribute("data-case-status", "passed");
+  await page.getByRole("navigation", { name: "Breadcrumb", exact: true }).getByRole("link", { name: "navigation-fixture", exact: true }).click();
 
   await profile.selectOption("legacy-codex");
   await expect(basic).toHaveAttribute("data-case-status", "failed");
@@ -335,6 +354,12 @@ test("case status dots summarize matching results and open failures", async ({ p
   await expect(basic).toHaveAttribute("data-case-status", "passed");
   await page.locator("[data-report-reset]").click();
   await basic.click();
-  await expect(page).toHaveURL(`${reportUrl}#execution-core-compatibility.legacy-codex.daytona.message-marker`);
+  await expect(page).toHaveURL(`${reportUrl}?view=all#execution-core-compatibility.legacy-codex.daytona.message-marker`);
   await expect(page.locator('[data-execution-id="core-compatibility.legacy-codex.daytona.message-marker"] .case-heading')).toBeInViewport();
+  await page.locator('[data-execution-id="core-compatibility.legacy-codex.local.message-marker"] .case-open').click();
+  await expect(page.locator("[data-report-case]:visible")).toHaveCount(1);
+  await expect(topLink).toHaveAttribute("data-case-status", "failed");
+  await expect(topLink).toHaveAccessibleDescription("failed · 2/3 configurations passed");
+  await page.getByRole("button", { name: "Legacy Codex · Daytona sandbox", exact: true }).click();
+  await expect(topLink).toHaveAttribute("data-case-status", "failed");
 });

@@ -1786,6 +1786,17 @@ export function agentRoutes(
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
   }
 
+  async function assertCanConfigureAgentSetup(req: Request, targetAgent: {
+    id: string; companyId: string; createdByUserId?: string | null; lifecycleState?: string; pauseReason?: string | null;
+  }, allowCompleted = false) {
+    if (req.actor.type === "board" && req.actor.userId && targetAgent.createdByUserId === req.actor.userId
+      && (allowCompleted || (targetAgent.lifecycleState === "paused" && targetAgent.pauseReason === "setup"))) {
+      await assertCanCreateAgentsForCompany(req, targetAgent.companyId);
+      return;
+    }
+    await assertCanUpdateAgent(req, targetAgent);
+  }
+
   async function assertCanReadAgent(req: Request, targetAgent: { id: string; companyId: string }) {
     if (!hasCompanyAccess(req, targetAgent.companyId)) {
       throw notFound("Agent not found");
@@ -3047,7 +3058,7 @@ export function agentRoutes(
       const service = aiConnectionService(db);
       const selection = await service.select({ companyId, userId, agentId: modelAgentId ?? "00000000-0000-0000-0000-000000000000",
         adapterType: type, runnerProvider: "acpx", acpxAgent: "copilot", binding, allowUninstalledPersonal: true, allowUninstalledShared });
-      const metadata = await probeCopilotConnection(db, companyId, await service.credential(selection), modelEnvironmentId, undefined, { pluginWorkerManager: options.pluginWorkerManager });
+      const metadata = await probeCopilotConnection(db, companyId, await service.credential(selection), modelEnvironmentId, undefined, { pluginWorkerManager: options.pluginWorkerManager, targetAgentId: modelAgentId ?? undefined });
       res.setHeader("Cache-Control", "no-store");
       res.json(metadata.models);
       return;
@@ -3128,8 +3139,8 @@ export function agentRoutes(
     // This metadata-only path sends no model prompt.
     if (test || binding.provider === "github") {
       const testEnvironmentId = await resolveAdapterTestEnvironmentId(companyId, environmentId, binding.provider === "github");
-      if (testEnvironmentId) await assertAdapterTestEnvironmentForCompany(companyId, testEnvironmentId);
-      const target = await resolveAdapterTestExecutionContext({ companyId, adapterType, environmentId: testEnvironmentId });
+      if (testEnvironmentId) await assertAdapterTestEnvironmentForCompany(companyId, testEnvironmentId, adapterType);
+      const target = await resolveAdapterTestExecutionContext({ companyId, adapterType, agentId: newAgent ? undefined : agentId, environmentId: testEnvironmentId });
       try {
         if (!target.executionTarget && target.fallbackChecks.length > 0) throw unprocessable("The agent environment is not available for adoption");
         await withManagedAiProbe(db, { companyId, agentId, responsibleUserId: userId, adapterType, binding, config, allowUninstalledPersonal: newAgent, allowUninstalledShared, allowLegacyValidation: true }, async managed => {
@@ -3170,8 +3181,9 @@ export function agentRoutes(
       if (savedAgentId) {
         if (!savedAgent) return;
         if (savedAgent.companyId !== companyId) throw notFound("Agent not found");
-        await assertCanUpdateAgent(req, savedAgent);
+        await assertCanConfigureAgentSetup(req, savedAgent);
       }
+      const testingSetup = savedAgent?.lifecycleState === "paused" && savedAgent.pauseReason === "setup";
       const poolBinding = requestedBinding ?? (savedAgent?.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(savedAgent.runtimeConfig.aiConnection) : undefined);
       const requestedEnvironmentId = await resolveAdapterTestEnvironmentId(
         companyId,
@@ -3185,7 +3197,7 @@ export function agentRoutes(
       // Fail closed on a foreign environment before any secret resolution, env
       // merge, target resolution, sandbox lease, or adapter test runs.
       if (requestedEnvironmentId) {
-        await assertAdapterTestEnvironmentForCompany(companyId, requestedEnvironmentId);
+        await assertAdapterTestEnvironmentForCompany(companyId, requestedEnvironmentId, type);
       }
       // Agent reads redact every plain environment value. When this is a saved
       // agent test, restore those display-only placeholders from the
@@ -3193,14 +3205,7 @@ export function agentRoutes(
       // the probe treats "***REDACTED***" as a value to persist.
       let adapterConfigForTest = inputAdapterConfig;
       if (savedAgent) {
-        const providerAdapter = savedAgent.adapterType === "paperclip_runner"
-          ? inputAdapterConfig.provider === "codex"
-            ? "codex_local"
-            : inputAdapterConfig.provider === "acpx" && inputAdapterConfig.acpxAgent === "claude"
-              ? "claude_local"
-              : null
-          : null;
-        const canRestoreEnv = savedAgent.adapterType === type || providerAdapter === type;
+        const canRestoreEnv = agentHarnessType(savedAgent.adapterType, savedAgent.adapterConfig) === agentHarnessType(type, inputAdapterConfig);
         // Permit testing a prospective adapter switch, but do not transfer
         // hidden values from the saved adapter into an unrelated harness.
         if (!canRestoreEnv && Object.values(parseObject(inputAdapterConfig.env)).some(value => {
@@ -3228,7 +3233,7 @@ export function agentRoutes(
       const adapter = requireServerAdapter(type);
       if (!retainsSavedExecution) await assertSelectableAdapterType(type, adapterConfigForTest);
       if (poolBinding?.mode === "router") {
-        await validateManagedAgentBinding(req, companyId, savedAgentId ?? "", type, adapterConfigForTest, poolBinding, requestedEnvironmentId, false, !savedAgentId);
+        await validateManagedAgentBinding(req, companyId, savedAgentId ?? "", type, adapterConfigForTest, poolBinding, requestedEnvironmentId, false, !savedAgentId || testingSetup);
         res.json({ adapterType: type, status: "warn", testedAt: new Date().toISOString(), checks: [{ code: "ai_connection_pool_task_test_required", level: "warn", message: "Pool configuration is available. Run a task to verify the selected account and harness; this preview does not allocate a task or contact a provider." }] });
         return;
       }
@@ -3281,6 +3286,7 @@ export function agentRoutes(
       const { executionTarget, environmentName, fallbackChecks, sandboxIdentityCheck, release } =
         await resolveAdapterTestExecutionContext({
           companyId,
+          agentId: savedAgentId ?? undefined,
           adapterType: type,
           environmentId: requestedEnvironmentId,
         });
@@ -3377,7 +3383,7 @@ export function agentRoutes(
             effectiveAdapterConfig.apiKey = req.body.testCredentials.API_SERVER_KEY;
           }
         }
-        const result = aiBinding ? await withManagedAiProbe(db, { companyId, agentId: req.body.agentId ?? "", responsibleUserId: responsibleUserForAiRequest(req), adapterType: type, binding: aiBinding, config: effectiveAdapterConfig, allowUninstalledPersonal: !req.body.agentId, allowUninstalledShared: !req.body.agentId && await canInstallSharedAiConnectionForNewAgent(db, req, companyId, aiBinding) }, async managed => {
+        const result = aiBinding ? await withManagedAiProbe(db, { companyId, agentId: req.body.agentId ?? "", responsibleUserId: responsibleUserForAiRequest(req), adapterType: type, binding: aiBinding, config: effectiveAdapterConfig, allowUninstalledPersonal: !savedAgentId || testingSetup, allowUninstalledShared: (!savedAgentId || testingSetup) && await canInstallSharedAiConnectionForNewAgent(db, req, companyId, aiBinding) }, async managed => {
           const managedAiCredentialHome = type === "paperclip_runner" && asRecord(managed.config)?.provider === "codex" && managed.home
             ? path.join(managed.home, "provider") : undefined;
           const tested = await testManagedEnvironment(type, { companyId, adapterType: type, config: managed.config, managedAiCredentialHome, executionTarget, environmentName }, aiBinding, managed, savedAgentId ?? undefined);
@@ -3505,7 +3511,7 @@ export function agentRoutes(
       await assertCanCreateAgentsForCompany(req, companyId);
       const environmentId = asNonEmptyString(req.query.environmentId);
       if (environmentId) {
-        await assertAdapterTestEnvironmentForCompany(companyId, environmentId);
+        await assertAdapterTestEnvironmentForCompany(companyId, environmentId, type);
       }
       res.setHeader("Cache-Control", "no-store");
 
@@ -4275,7 +4281,7 @@ export function agentRoutes(
   // adapter-config secret lands in the activity log.
   const hireFingerprint = (body: unknown): string => sha256Digest(body);
 
-  router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
+  const handleAgentHire = async (req: Request, res: Response) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
     const sourceIssueIds = parseSourceIssueIds(req.body);
@@ -4296,11 +4302,49 @@ export function agentRoutes(
       onboardingFirstAgent: hireOnboardingFirstAgent,
       // This intent flag is consumed below and must never reach agent create.
       inheritRuntimeFrom,
+      setupAgentId,
       runner: hireRunner,
       ...hireInput
     } = req.body;
 
-    const hiredAgentId = randomUUID();
+    if (setupAgentId) {
+      assertBoard(req);
+      if (!req.actor.userId) throw forbidden("User identity required for agent setup");
+      const setupAgent = await svc.getById(setupAgentId);
+      if (!setupAgent || setupAgent.companyId !== companyId) throw notFound("Agent setup not found");
+      await assertCanConfigureAgentSetup(req, setupAgent, true);
+      if (!setupAgent.lifecycleHolds.includes("setup")) {
+        if (!(await assertAgentReadAllowed(req, res, setupAgent))) return;
+        await assertCanReadConfigurations(req, companyId);
+        if (["terminated", "rejected", "deleting"].includes(setupAgent.lifecycleState)) throw conflict("Agent setup is no longer available");
+        const priorApprovals = await approvalsSvc.list(companyId, undefined,
+          sql`type = 'hire_agent' AND payload ->> 'agentId' = ${setupAgentId}`);
+        let approval = priorApprovals.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ?? null;
+        if (!approval && setupAgent.status === "pending_approval") {
+          const adapterConfig = redactEventPayload(setupAgent.adapterConfig) ?? {};
+          const runtimeConfig = redactEventPayload(setupAgent.runtimeConfig) ?? {};
+          const desiredSkills = readPaperclipSkillSyncPreference(setupAgent.adapterConfig).desiredSkills;
+          approval = await approvalsSvc.create(companyId, {
+            type: "hire_agent", requestedByAgentId: null, requestedByUserId: req.actor.userId ?? null,
+            status: "pending", payload: {
+              name: setupAgent.name, role: setupAgent.role, title: setupAgent.title, icon: setupAgent.icon,
+              appearance: setupAgent.appearance, reportsTo: setupAgent.reportsTo, capabilities: setupAgent.capabilities,
+              adapterType: setupAgent.adapterType, adapterConfig, runtimeConfig, desiredSkills,
+              budgetMonthlyCents: setupAgent.budgetMonthlyCents, metadata: redactEventPayload(setupAgent.metadata ?? {}) ?? {},
+              agentId: setupAgent.id, requestedByAgentId: null,
+              requestedConfigurationSnapshot: { adapterType: setupAgent.adapterType, adapterConfig, runtimeConfig, desiredSkills },
+            }, decisionNote: null, decidedByUserId: null, decidedAt: null, updatedAt: new Date(),
+          });
+        }
+        res.status(200).json({ agent: redactAgentRowForResponse(setupAgent), approval, idempotent: true });
+        return;
+      }
+      if (hireInput.adapterConfig && agentHarnessType(hireInput.adapterType ?? "process", hireInput.adapterConfig)
+        === agentHarnessType(setupAgent.adapterType, setupAgent.adapterConfig)) {
+        hireInput.adapterConfig = restoreRedactedAgentEnv(hireInput.adapterConfig, setupAgent.adapterConfig);
+      }
+    }
+    const hiredAgentId = setupAgentId ?? randomUUID();
     const requestedHireConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, hireInput.runtimeConfig);
     assertNoAgentAdapterConfigMutation(req, requestedHireConfig);
@@ -4460,6 +4504,7 @@ export function agentRoutes(
           lastHeartbeatAt: null,
         },
         {
+          ...(setupAgentId ? { setupAgentId } : {}),
           createdByUserId: req.actor.type === "board" ? req.actor.userId : null,
           runnerResolved: true,
           responsibleUserId: responsibleUserForAiRequest(req),
@@ -4610,6 +4655,12 @@ export function agentRoutes(
       ? await withHireRunLock(`${companyId}:${runId}`, performHire)
       : await performHire();
     res.status(outcome.status).json(outcome.body);
+  };
+
+  router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
+    if (req.body.setupAgentId) {
+      await withHireRunLock(`setup:${req.params.companyId}:${req.body.setupAgentId}`, () => handleAgentHire(req, res));
+    } else await handleAgentHire(req, res);
   });
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
@@ -4625,7 +4676,11 @@ export function agentRoutes(
       res.status(404).json({ error: "Company not found" });
       return;
     }
-    if (company.requireBoardApprovalForNewAgents) {
+    if (req.body.setupId) {
+      assertBoard(req);
+      if (!req.actor.userId) throw forbidden("User identity required for agent setup");
+    }
+    if (company.requireBoardApprovalForNewAgents && !req.body.setupId) {
       throw conflict(
         "Direct agent creation requires board approval. Use POST /api/companies/:companyId/agent-hires to create a pending hire approval.",
       );
@@ -4644,10 +4699,11 @@ export function agentRoutes(
       // The onboarding marker is not an agent column. The server consumes it to
       // seed the chief-of-staff persona; it never reaches the insert values.
       onboardingFirstAgent: createOnboardingFirstAgent,
+      setupId,
       runner: createRunner,
       ...createInput
     } = req.body;
-    const agentId = randomUUID();
+    const agentId = setupId ?? randomUUID();
     const requestedCreateConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
     assertNoAgentAdapterConfigMutation(req, requestedCreateConfig);
@@ -4658,7 +4714,7 @@ export function agentRoutes(
     createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType, createInput.adapterConfig);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
-    await assertFreshPaperclipRunnerProvider(
+    if (!setupId) await assertFreshPaperclipRunnerProvider(
       companyId,
       createInput.adapterType,
       rawCreateAdapterConfig,
@@ -4713,7 +4769,7 @@ export function agentRoutes(
     });
 
     const managedBinding = normalizedRuntimeConfig.aiConnection ? aiRuntimeConnectionBindingSchema.parse(normalizedRuntimeConfig.aiConnection) : undefined;
-    const managedConnection = managedBinding ? await validateManagedAgentBinding(req, companyId, agentId, createInput.adapterType, normalizedAdapterConfig, managedBinding, createInput.defaultEnvironmentId, false, true) : undefined;
+    const managedConnection = managedBinding && !setupId ? await validateManagedAgentBinding(req, companyId, agentId, createInput.adapterType, normalizedAdapterConfig, managedBinding, createInput.defaultEnvironmentId, false, true) : undefined;
     const createdAgent = await svcLifecycle.requestHire(
       companyId,
       {
@@ -4726,6 +4782,7 @@ export function agentRoutes(
         lastHeartbeatAt: null,
       },
       {
+        ...(setupId ? { setupOnly: true } : {}),
         createdByUserId: req.actor.type === "board" ? req.actor.userId : null,
         runnerResolved: true,
         responsibleUserId: responsibleUserForAiRequest(req),
@@ -4740,6 +4797,14 @@ export function agentRoutes(
         },
       },
     );
+    if (setupId) {
+      if (!createdAgent.lifecycleHolds.includes("setup")) {
+        if (!(await assertAgentReadAllowed(req, res, createdAgent))) return;
+        await assertCanReadConfigurations(req, companyId);
+      }
+      res.status(201).json(redactAgentRowForResponse(createdAgent));
+      return;
+    }
     const onboardingFirstAgentBundle = await resolveOnboardingFirstAgentBundle({
       onboardingFirstAgent: createOnboardingFirstAgent,
       actorType: req.actor.type,
@@ -5302,7 +5367,7 @@ export function agentRoutes(
     // one since disabled) stays allowed, so a disabled harness does not make an
     // existing agent uneditable.
     if (runner !== undefined) {
-      await assertCanUpdateAgent(req, existing);
+      await assertCanConfigureAgentSetup(req, existing);
       const config = hasOwn(patchData, "adapterConfig") ? { ...(replaceAdapterConfig ? {} : existing.adapterConfig), ...asRecord(patchData.adapterConfig) } : existing.adapterConfig;
       Object.assign(patchData, await resolveNewAgentRunnerForCompany(db, existing.companyId, {
         adapterType: typeof patchData.adapterType === "string" ? patchData.adapterType : existing.adapterType,
@@ -5406,12 +5471,12 @@ export function agentRoutes(
         && (["openai_dot", "muse"].includes(String(rawEffectiveAdapterConfig.provider)) || ["openai_dot", "muse"].includes(String(existingRunnerProvider)))) {
         await assertSelectableAdapterType(requestedAdapterType, rawEffectiveAdapterConfig);
       }
-      if (
+      if (!(existing.lifecycleState === "paused" && existing.pauseReason === "setup") && (
         changingAdapterType ||
         (requestedAdapterType === "paperclip_runner" &&
           (requestedAdapterConfig !== null ||
             rawEffectiveAdapterConfig.provider !== existingRunnerProvider))
-      ) {
+      )) {
         await assertFreshPaperclipRunnerProvider(
           existing.companyId,
           requestedAdapterType,
@@ -5438,18 +5503,27 @@ export function agentRoutes(
         adapterConfig: patchData.adapterConfig,
       });
     }
-    if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection) requestedRuntimeConfig.aiConnection = existing.runtimeConfig.aiConnection;
     const nextAiConfig = (patchData.adapterConfig ?? existing.adapterConfig) as Record<string, unknown>;
+    if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection
+      && !(existing.lifecycleState === "paused" && existing.pauseReason === "setup")) {
+      const existingBinding = aiRuntimeConnectionBindingSchema.safeParse(existing.runtimeConfig.aiConnection).data;
+      if (existingBinding && agentHarnessType(existing.adapterType, existing.adapterConfig) === agentHarnessType(requestedAdapterType, nextAiConfig)
+        && (existingBinding.mode === "router" || isAiConnectionCompatible(existingBinding,
+          requestedAdapterType, nextAiConfig.model, nextAiConfig.provider, nextAiConfig.acpxAgent))) {
+        requestedRuntimeConfig.aiConnection = existingBinding;
+      }
+    }
     if (!requestedRuntimeConfig?.aiConnection && !existing.runtimeConfig.aiConnection
+      && !(existing.lifecycleState === "paused" && existing.pauseReason === "setup")
       && requestedAdapterType === "paperclip_runner" && nextAiConfig.provider === "acpx"
       && nextAiConfig.acpxAgent === "copilot"
       && (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId"))) {
       requestedRuntimeConfig = { ...(requestedRuntimeConfig ?? existing.runtimeConfig),
         aiConnection: { provider: "github", method: "api_key", mode: "responsible_user" } };
     }
-    const nextAiBinding = aiRuntimeConnectionBindingSchema.safeParse(requestedRuntimeConfig?.aiConnection ?? existing.runtimeConfig.aiConnection).data;
+    const nextAiBinding = aiRuntimeConnectionBindingSchema.safeParse(requestedRuntimeConfig ? requestedRuntimeConfig.aiConnection : existing.runtimeConfig.aiConnection).data;
     if (nextAiBinding) {
-      await assertCanUpdateAgent(req, existing);
+      await assertCanConfigureAgentSetup(req, existing);
       // Compare parsed bindings: jsonb stores object keys in its own order, so the
       // stored value never serializes like the parsed one.
       const changed = !isDeepStrictEqual(nextAiBinding, aiRuntimeConnectionBindingSchema.safeParse(existing.runtimeConfig.aiConnection).data);
@@ -5460,7 +5534,13 @@ export function agentRoutes(
         && (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId"));
       // Retest only when the connection, the harness configuration or the environment changes;
       // runtime settings such as heartbeat limits leave the validated connection as it is.
-      if (changed || touchesAdapterConfiguration || environmentChanged || copilotConfigurationChanged) await validateManagedAgentBinding(req, existing.companyId, existing.id, requestedAdapterType, aiConfig, nextAiBinding, (patchData.defaultEnvironmentId !== undefined ? patchData.defaultEnvironmentId : existing.defaultEnvironmentId) as string | null, true);
+      // A harness change (including a router's) is covered by touchesAdapterConfiguration.
+      if (changed || touchesAdapterConfiguration || environmentChanged || copilotConfigurationChanged) {
+        const configuringSetup = existing.lifecycleState === "paused" && existing.pauseReason === "setup";
+        await validateManagedAgentBinding(req, existing.companyId, existing.id, requestedAdapterType, aiConfig, nextAiBinding,
+          (patchData.defaultEnvironmentId !== undefined ? patchData.defaultEnvironmentId : existing.defaultEnvironmentId) as string | null,
+          !configuringSetup, configuringSetup);
+      }
     }
     if (requestedRuntimeConfig) patchData.runtimeConfig = requestedRuntimeConfig;
     if (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId")) {
@@ -5482,7 +5562,7 @@ export function agentRoutes(
     if (profileOnlyChange) {
       await assertCanApplyAgentProfileChange(req, existing);
     } else {
-      await assertCanUpdateAgent(req, existing);
+      await assertCanConfigureAgentSetup(req, existing);
     }
 
     const actor = getActorInfo(req);

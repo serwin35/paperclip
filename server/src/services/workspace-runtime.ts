@@ -1,3 +1,4 @@
+import { insertIssueComment } from "./issue-comment-writes.js";
 import { restoreGitWorkspaceContents } from "./git-workspace-contents.js";
 import { savedGitWorkspaceRestoration, ensureSavedGitCommit, GitCacheRestorationFailure } from "./git-workspace-restoration.js";
 import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
@@ -134,6 +135,7 @@ export interface ExecutionWorkspaceAdditionalInput {
 }
 
 export interface ExecutionWorkspaceInput {
+  providerBinding?: import("@paperclipai/shared").WorkspaceProviderBinding;
   baseCwd: string;
   source: "project_primary" | "task_session" | "agent_home";
   projectId: string | null;
@@ -757,7 +759,7 @@ function sanitizeSlugPart(value: string | null | undefined, fallback: string): s
   return normalized.length > 0 ? normalized : fallback;
 }
 
-function renderWorkspaceTemplate(template: string, input: {
+export function renderWorkspaceTemplate(template: string, input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   projectId: string | null;
@@ -785,7 +787,7 @@ function renderWorkspaceTemplate(template: string, input: {
   });
 }
 
-function sanitizeBranchName(value: string): string {
+export function sanitizeBranchName(value: string): string {
   return value
     .trim()
     .replace(/[^A-Za-z0-9._/-]+/g, "-")
@@ -1631,18 +1633,15 @@ async function writeDirtyQuarantineAuditComments(input: {
   let claimantAuditCommentId: string | null = null;
   const now = new Date();
   if (input.evidence.sourceIssueId) {
-    const [sourceComment] = await input.db
-      .insert(issueComments)
-      .values({
-        companyId: input.companyId,
-        issueId: input.evidence.sourceIssueId,
-        authorAgentId: null,
-        authorUserId: null,
-        authorType: "system",
-        createdByRunId: input.heartbeatRunId,
-        body,
-      })
-      .returning({ id: issueComments.id });
+    const [sourceComment] = await insertIssueComment(input.db, {
+      companyId: input.companyId,
+      issueId: input.evidence.sourceIssueId,
+      authorAgentId: null,
+      authorUserId: null,
+      authorType: "system",
+      createdByRunId: input.heartbeatRunId,
+      body,
+    });
     sourceAuditCommentId = sourceComment?.id ?? null;
     await input.db
       .update(issues)
@@ -1652,18 +1651,15 @@ async function writeDirtyQuarantineAuditComments(input: {
 
   const claimantIssueId = input.evidence.contention?.claimedByIssueId ?? null;
   if (claimantIssueId && claimantIssueId !== input.evidence.sourceIssueId) {
-    const [claimantComment] = await input.db
-      .insert(issueComments)
-      .values({
-        companyId: input.companyId,
-        issueId: claimantIssueId,
-        authorAgentId: null,
-        authorUserId: null,
-        authorType: "system",
-        createdByRunId: input.heartbeatRunId,
-        body,
-      })
-      .returning({ id: issueComments.id });
+    const [claimantComment] = await insertIssueComment(input.db, {
+      companyId: input.companyId,
+      issueId: claimantIssueId,
+      authorAgentId: null,
+      authorUserId: null,
+      authorType: "system",
+      createdByRunId: input.heartbeatRunId,
+      body,
+    });
     claimantAuditCommentId = claimantComment?.id ?? null;
     await input.db
       .update(issues)
@@ -4234,6 +4230,7 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
   runCleanupCommands?: boolean;
   forceWorktreeRemoval?: boolean;
 }) {
+  if (input.workspace.providerType === "plugin") throw new Error("Managed workspace cleanup requires its storage plugin");
   const warnings: string[] = [];
   const workspacePath = input.workspace.providerRef ?? input.workspace.cwd;
   const isolatedSource = await verifiedRecordedIsolatedRemoteSource(input.workspace);

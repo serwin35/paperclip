@@ -1308,6 +1308,46 @@ Invites tab does not hide this Cloud action.
 
 ## 10.3 Agents
 
+The Core setup wizard creates its agent record when the user submits the agent
+name, before adapter selection, authentication, and runtime configuration.
+Until the adapter is chosen, the held record uses a provisional adapter
+(process with no command when enabled) and `metadata.setupAdapterPending: true`. Resuming such a record
+returns to adapter selection with automatic runner selection. Choosing an adapter
+updates the same record and clears that marker. Held Copilot records can select
+the adapter before connecting an account; account checks still apply at connection
+testing and final hire. Setup preserves server-assigned names, including numbered
+duplicates. Name-only lookup does not adopt another unfinished record. `POST /companies/:companyId/agents` accepts a board-only `setupId`
+(a UUID used as the agent ID). The record stays paused with a `setup` hold;
+repeating that request reuses the same unfinished record. It starts no lifecycle
+preparation and creates no hire approval. Instructions, task-assignment membership,
+and creation activity are applied at final hire. Normal create requests keep their
+existing behavior.
+
+The wizard saves configuration on that record through `PATCH /agents/:agentId`.
+To finish, it submits the final configuration to
+`POST /companies/:companyId/agent-hires` with `setupAgentId`. Core validates the
+configuration and completes the same record. Companies that require approval
+receive a hire approval for that final configuration; other agents enter normal
+preparation and verification. A setup record cannot be resumed into execution,
+receive API keys, or authenticate as an agent. Its standard grants apply at hire.
+Authorized retries recover the completed record and its existing hire approval;
+they cannot replace the submitted configuration. Both setup entry points save
+configuration on the record so the roster can reopen it with the same runner.
+Resuming setup loads the server configuration before autosaving local edits.
+Its saved environment is used for login, connection verification, and final hire.
+Changing harnesses drops incompatible saved AI connections. Setup runtime updates
+carry the current connection choice rather than retaining a superseded binding.
+Connection tests use the setup ID to restore redacted environment values under
+the setup creator's permissions; shared connections are installed only at hire.
+Changing Claude authentication modes removes the previous mode's credentials.
+Held setup records may omit provider details such as the Copilot model; final
+hire still requires a complete provider configuration. Kimi API model, protocol,
+and endpoint choices are also stored as nonsecret `adapterConfig.kimiApi` settings
+so they can be restored while environment values remain redacted.
+Credentials remain available for retry when a save response is lost. A confirmed
+client rejection removes only newly staged credentials from that attempt.
+Sandbox authentication and saved AI connections keep their existing flows.
+
 - `GET /companies/:companyId/agents`
 - `POST /companies/:companyId/agents`
 - `GET /agents/:agentId`
@@ -1615,6 +1655,22 @@ Scheduler must skip invocation when:
 - agent is paused/terminated
 - an existing run is active
 - hard budget limit has been hit
+
+Budget admission and accounting serialize under the company accounting lock.
+The dispatch boundary rechecks current company, agent, and project policies and
+reserves capacity before paid work starts. Accounting commits budget blocks and
+durable stop intent without waiting for provider shutdown or reconciling unrelated
+agents. An asynchronous worker cancels only work in the affected scope; committed
+stop intent survives policy changes and restart until existing stop proof succeeds.
+
+Accepted cumulative per-run usage checkpoints contribute observed running spend
+before the final ledger charge. Admission counts each unfinished operation's
+maximum of its reservation and observed spend; hard stops count actual ledger
+and observed running spend, rather than reservation estimates. Final settlement
+atomically replaces the observation with the ledger charge. Incomplete or unknown
+accounting remains conservative. Mid-run enforcement depends on provider usage
+reports or existing supported pricing; providers reporting only at completion
+cannot offer exact mid-call spend detection.
 
 Legacy execution records a renewable controller lease when claiming a queued run,
 before provisioning. A live lease protects the run during overlapping service

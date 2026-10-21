@@ -1,3 +1,7 @@
+import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
+import { writeExecutionControl } from "../execution-control-notifications.js";
+import { notifyExecutionRunWork } from "../execution-control-notifications.js";
+import { createRunUsageRecorder } from "../usage-receipts.js";
 import { applyObservabilityEnvironment, type ProviderObservabilityLaunch } from "@paperclipai/adapter-utils/agent-observability";
 import { museRunnerBroker } from "../muse-runner-broker.js";
 import { nativeCaseHandoffResult } from "./native-case-handoff.js";
@@ -335,6 +339,24 @@ const CODEX_HOME_NON_PERSISTENT_ENTRIES = [
   ".tmp",
   "auth.json",
   "config.toml",
+] as const;
+const CODEX_REMOTE_PLUGIN_MARKETPLACES = [
+  "openai-curated-remote",
+  "created-by-me-remote",
+  "workspace-directory",
+  "workspace-shared-with-me",
+  "workspace-shared-with-me-private",
+  "workspace-shared-with-me-unlisted",
+] as const;
+const CODEX_HOME_REDOWNLOADABLE_ENTRIES = [
+  ".remote-plugin-install-staging",
+  "cache/remote_plugin_catalog",
+  "plugins/.remote-plugin-install-staging",
+  ...CODEX_REMOTE_PLUGIN_MARKETPLACES.map((marketplace) => `plugins/cache/${marketplace}`),
+] as const;
+const CODEX_HOME_CHECKPOINT_EXCLUDED_ENTRIES = [
+  ...CODEX_HOME_NON_PERSISTENT_ENTRIES,
+  ...CODEX_HOME_REDOWNLOADABLE_ENTRIES,
 ] as const;
 const RUNNERD_CONTROL_PLANE_STATE_SCHEMA =
   "paperclip.runner.durable.control-plane-state.v1";
@@ -5518,7 +5540,7 @@ export function resolveNativeHarnessPersistenceProfile(
           // credential source and config.toml can contain the native MCP
           // bearer token. Re-materialize both for a replacement sandbox
           // instead of putting credentials into the disaster-recovery copy.
-          excludeEntries: CODEX_HOME_NON_PERSISTENT_ENTRIES,
+          excludeEntries: CODEX_HOME_CHECKPOINT_EXCLUDED_ENTRIES,
         })
       : execution.provider.kind === "opencode"
         ? {
@@ -5541,7 +5563,7 @@ export function resolveNativeHarnessPersistenceProfile(
                   ? ["auth.json", "auth-refresh.json", "auth-refresh.json.tmp", "config.toml", "logs"].map((entry) =>
                     `acpx/${acpxRuntimeSessionDirectoryName(nativeSessionKey(execution))}/grok-home/${entry}`)
                   : execution.provider.agent === "codex"
-                  ? CODEX_HOME_NON_PERSISTENT_ENTRIES.map(
+                  ? CODEX_HOME_CHECKPOINT_EXCLUDED_ENTRIES.map(
                       (entry) =>
                         `acpx/${acpxRuntimeSessionDirectoryName(nativeSessionKey(execution))}/codex-home/${entry}`,
                     )
@@ -8199,6 +8221,7 @@ async function executePaperclipNativeSessionWithinScope(
     )).orderBy(heartbeatRunEvents.seq);
     for (const row of history) turnAccounting.observe(record(row.payload).prpEvent as PrpEvent);
   }
+  let fallbackUsageRecorder: ReturnType<typeof createRunUsageRecorder> | undefined;
   const persistAccountingUsage = async (usage: Record<string, unknown> | null, complete: boolean) => {
     const accountingUsage = normalizeNativeUsage(usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" });
     const accountingCost = accountingUsage ? nativeUsageCostUsd(usage, input.execution.provider) : undefined;
@@ -8208,15 +8231,14 @@ async function executePaperclipNativeSessionWithinScope(
       : "unpriced" as const;
     const billing = resolveNativeBilling(input.execution.provider, input.runnerEnvironment, input.billingIdentity);
     const costUsdExact = typeof usage?.accountingCostUsdExact === "string" ? usage.accountingCostUsdExact : undefined;
-    await input.onUsage?.({ usage: accountingUsage, ...billing, complete, usageBasis: "per_run", costUsdExact,
-      model: input.execution.provider.model ?? "unknown", costUsd: accountingCost ?? null, costStatus });
-    if (!input.onUsage) await input.db.update(heartbeatRuns).set({
-      costAccountingPending: true,
-      usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({
-        ...accountingUsage, ...billing, accountingReceiptReady: complete, model: input.execution.provider.model ?? "unknown",
-        costUsd: accountingCost ?? null, costUsdExact: costUsdExact ?? null, costStatus: costStatus ?? null, usageSource: "per_run",
-      })}::jsonb`,
-    }).where(and(eq(heartbeatRuns.id, input.execution.binding.runId), eq(heartbeatRuns.companyId, input.execution.binding.companyId), isNull(heartbeatRuns.costAccountedAt)));
+    const checkpoint: AdapterUsageCheckpoint = { usage: accountingUsage, ...billing, complete, usageBasis: "per_run", costUsdExact,
+      model: input.execution.provider.model ?? "unknown", costUsd: accountingCost ?? null, costStatus };
+    if (input.onUsage) await input.onUsage(checkpoint);
+    else {
+      fallbackUsageRecorder ??= createRunUsageRecorder(input.db, { companyId: input.execution.binding.companyId,
+        runId: input.execution.binding.runId, adapterType: "paperclip_runner" });
+      await (await fallbackUsageRecorder).capture(checkpoint);
+    }
   };
   // appendEvent awaits this receipt before the runtime may commit completeRun.
   // Replayed events must rebuild it too after a stop between event and receipt.
@@ -9207,7 +9229,7 @@ async function executePaperclipNativeSessionWithinScope(
     };
     const stoppedLeaseRenewal = leaseRenewal.stop().catch(() => undefined);
     try {
-      await input.db
+      await writeExecutionControl(input.db, DELIVERY_QUEUES.executionFinalization, tx => tx
         .update(nativeRunFinalizations)
         .set({
           controlDeadlineAt: new Date(
@@ -9219,7 +9241,7 @@ async function executePaperclipNativeSessionWithinScope(
             eq(nativeRunFinalizations.runId, input.execution.binding.runId),
             eq(nativeRunFinalizations.leaseOwner, leaseOwner),
           ),
-        );
+        ));
 
       const failedAtMs = Date.now();
       const executionFailureMessage = redactIdentityText(
@@ -9261,7 +9283,7 @@ async function executePaperclipNativeSessionWithinScope(
           typeof stopIntent.intentAuditId === "string" && stopIntent.intentAuditId.length > 0 &&
           ["pending", "acknowledged"].includes(String(stopIntent.dispatchState));
         if (stoppedRun && (pendingStartupStop || hasAcknowledgedNativeStopIntent(stoppedRun) || hasAcknowledgedNativeReassignmentStopIntent(stoppedRun))) {
-          const [settled] = await input.db.update(nativeRunFinalizations).set({
+          const [settled] = await writeExecutionControl(input.db, DELIVERY_QUEUES.executionFinalization, tx => tx.update(nativeRunFinalizations).set({
             phase: "terminal_failure", failureCode: "native_retry_cancelled", nextAttemptAt: null,
             leaseOwner: null, leaseExpiresAt: null, controlDeadlineAt: null, recoveryState: null,
             updatedAt: new Date(),
@@ -9271,7 +9293,7 @@ async function executePaperclipNativeSessionWithinScope(
             eq(nativeRunFinalizations.leaseOwner, leaseOwner),
             eq(nativeRunFinalizations.attempt, attempt),
             isNull(nativeRunFinalizations.resultId),
-          )).returning({ runId: nativeRunFinalizations.runId });
+          )).returning({ runId: nativeRunFinalizations.runId }));
           if (settled) {
             await stoppedLeaseRenewal;
             if (warmSessionId !== null && lifecyclePolicy.mode === "warm") {
@@ -9358,6 +9380,7 @@ async function executePaperclipNativeSessionWithinScope(
             ),
           )
           .for("update");
+        await notifyExecutionRunWork(tx);
         const updated = await tx
           .update(nativeRunFinalizations)
           .set({

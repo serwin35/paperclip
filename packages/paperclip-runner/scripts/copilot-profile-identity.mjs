@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import { resolve, dirname } from "node:path";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const fixture = resolve(root, "test/fixtures/copilot-profile-v50-identity.json");
+const fixture = resolve(root, "test/fixtures/copilot-profile-v53-identity.json");
 const historical = JSON.parse(readFileSync(resolve(root, "test/fixtures/copilot-profile-v12-identity.json"), "utf8"));
-const declaration = { ...historical.declaration, agentProfileVersion: 50 };
+const declaration = { ...historical.declaration, agentProfileVersion: 53 };
 delete declaration.permissionIdentitySourceSha256;
 const sources = {
   displayEventSourceSha256: "src/drivers/acpx/copilot-events.ts",
@@ -32,6 +32,7 @@ const sources = {
   nativeBackendFactorySourceSha256: "src/backends/native-backend-factory.ts",
   nativeInstructionsSourceSha256: "src/backends/runtime-context.ts",
   providerLaunchSourceSha256: "src/live/runner-provider-launch.ts",
+  launchPreparationStoreSourceSha256: "src/live/runner-launch-preparation-store.ts",
   runtimeRequestBridgeSourceSha256: "src/live/runnerd-codex-transport.ts",
   runtimeRequestFacadeSourceSha256: "src/drivers/codex/codex-session-notifications.ts",
   runtimeRequestNotificationSourceSha256: "src/drivers/codex/codex-thread-normalization.ts",

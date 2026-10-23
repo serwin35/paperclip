@@ -16,8 +16,10 @@ Implement these hooks:
 - `onEnvironmentDestroyLease`
 
 Task execution does not require `onEnvironmentExecute` or
-`onEnvironmentRealizeWorkspace`. The task API has no shell or file transfer
-operation. Use a separate workflow to install and save agent files.
+`onEnvironmentRealizeWorkspace`. The task API has no shell command or file installation
+operation. Use a separate workflow to install agent files. Providers that
+advertise `workspaceFileReadVersion: 1` can return task output files through the
+bounded `read_file` operation for attachments and deliverables.
 
 Core supports per-turn workspace sessions with Codex, OpenCode, and ACPX.
 OpenCode and ACPX require the existing qualified provider profiles.
@@ -137,3 +139,23 @@ after it saves the agent. Core does not require a computer before this save.
 
 The Runner fixture uses a synthetic Codex provider and local sockets.
 It does not qualify a deployed plugin, live account, or production WSS proxy.
+
+## Workspace completion and maintenance
+
+A storage provider can declare `workspaceProvider.finalizationVersion: 1`.
+Core then sends `workspaceOperation` with `operation.kind: "finalize"`, the retained
+binding, lifecycle generation, and originating `runId` and `agentId`. The operation
+must verify workspace identity and make the run's retained writes durable before
+returning `{ kind: "finalized", headSha, branchName }`. Git workspaces must still
+report the assigned branch. Non-Git workspaces return null Git fields.
+
+Completion permits dirty, untracked, ignored, and unpublished work. It does not
+prove remote recoverability or authorize deletion. The provider chooses how to
+meet this contract; Core does not prescribe a VM, filesystem, or Git layout.
+Core gives completion a 30-second deadline. An unavailable execution host or an
+unconfirmed durability barrier must fail retryably, never return success.
+Recovery receives the original run and agent context.
+
+The existing agent-independent `inspect` and `remove` operations continue to
+protect storage maintenance. Providers that do not declare finalization version 1
+retain the inspection-based completion path. No stored binding migration is required.

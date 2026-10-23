@@ -8,15 +8,18 @@ const entry = (matcher: string, hooks: unknown[], extra: Record<string, unknown>
 describe("Claude settings overlay", () => {
   it("adds hooks while preserving other settings and permissions", () => {
     const existing = { permissions: { allow: ["Read"] }, statusLine: { type: "command" }, hooks: { PostToolUse: [{ matcher: "*", hooks: [hook("audit")] }] } };
-    const result = mergeClaudeSettingsOverlay(existing, overlay([entry("Bash", [hook("guard", { dedupeCommandMarker: "guard-marker" })])]));
+    const result = mergeClaudeSettingsOverlay(existing, JSON.stringify({ dedupeCommandMarker: "guard-marker", hooks: { PreToolUse: [entry("Bash", [hook("guard")])] } }));
     expect(result.status).toBe("applied");
     expect(result.added).toBe(1);
     expect(result.settings).toEqual({ ...existing, hooks: { ...existing.hooks, PreToolUse: [entry("Bash", [hook("guard")])] } });
   });
 
-  it("does not duplicate a marker match or exact hook", () => {
+  it("does not duplicate an entry by marker or exact canonical equality", () => {
     const existing = { hooks: { PreToolUse: [entry("Bash", [hook("node guard-marker")])] } };
-    const result = mergeClaudeSettingsOverlay(existing, overlay([entry("Bash", [hook("node guard-marker", { dedupeCommandMarker: "guard-marker" })]), entry("Bash", [hook("other")]) ]));
+    const result = mergeClaudeSettingsOverlay(existing, JSON.stringify({
+      dedupeCommandMarker: "guard-marker",
+      hooks: { PreToolUse: [entry("Bash", [hook("node guard-marker")]), entry("Write", [hook("other")])] },
+    }));
     expect(result.added).toBe(1);
     expect(result.skipped).toBe(1);
   });
@@ -31,17 +34,18 @@ describe("Claude settings overlay", () => {
     expect(second.settings).toEqual(first.settings);
   });
 
-  it("keeps an unrelated Bash hook and only adds a missing matcher", () => {
+  it("appends an independent Bash entry and leaves unrelated entries unchanged", () => {
     const existing = { hooks: { PreToolUse: [entry("Bash", [hook("echo audit")]), entry("^mcp__paperclip-assigned__", [hook("node guard-marker")])] } };
-    const result = mergeClaudeSettingsOverlay(existing, overlay([
+    const result = mergeClaudeSettingsOverlay(existing, JSON.stringify({ dedupeCommandMarker: "guard-marker", hooks: { PreToolUse: [
       entry("Bash", [hook("node guard")]),
-      entry("^mcp__paperclip-assigned__", [hook("node guard-marker", { dedupeCommandMarker: "guard-marker" })]),
-    ]));
+      entry("^mcp__paperclip-assigned__", [hook("node guard-marker")]),
+    ] } }));
     expect(result.added).toBe(1);
     expect(result.skipped).toBe(1);
     expect(result.settings).toEqual({ hooks: { PreToolUse: [
-      entry("Bash", [hook("echo audit"), hook("node guard")]),
+      entry("Bash", [hook("echo audit")]),
       entry("^mcp__paperclip-assigned__", [hook("node guard-marker")]),
+      entry("Bash", [hook("node guard")]),
     ] } });
   });
 
@@ -69,6 +73,7 @@ describe("Claude settings overlay", () => {
       overlay([entry("Bash", [hook("guard", { type: "prompt" })])]),
       overlay([entry("Bash", [hook("guard", { extra: true })])]),
       overlay([entry("Bash", [hook("guard", { dedupeCommandMarker: "" })])]),
+      JSON.stringify({ dedupeCommandMarker: "", hooks: { PreToolUse: [entry("Bash", [hook("guard")])] } }),
       overlay([entry("Bash", [hook("guard")], { unknown: true })]),
     ]) {
       const result = mergeClaudeSettingsOverlay(existing, raw);
@@ -88,5 +93,29 @@ describe("Claude settings overlay", () => {
     const result = mergeClaudeSettingsOverlay({}, overlay([entry("Bash", [hook("one")]), entry("Bash", [hook("one")])]));
     expect(result.added).toBe(1);
     expect(result.skipped).toBe(1);
+  });
+
+  it("skips strict profile entries when the marker is present for both matchers", () => {
+    const marker = "/command-guard/guard.mjs";
+    const strict = { hooks: { PreToolUse: [
+      entry("Bash", [hook(`node ${marker} --strict`)]),
+      entry("^mcp__paperclip-assigned__", [hook(`node ${marker} --strict`)]),
+    ] } };
+    const raw = JSON.stringify({ dedupeCommandMarker: marker, hooks: { PreToolUse: [
+      entry("Bash", [hook(`node ${marker} --scope=agents`)]),
+      entry("^mcp__paperclip-assigned__", [hook(`node ${marker} --scope=agents`)]),
+    ] } });
+    const result = mergeClaudeSettingsOverlay(strict, raw);
+    expect(result.added).toBe(0);
+    expect(result.skipped).toBe(2);
+    expect(result.settings).toBe(strict);
+  });
+
+  it("compares hook entries canonically regardless of object key order", () => {
+    const existing = { hooks: { PreToolUse: [entry("Bash", [{ command: "guard", type: "command", timeout: 20 }])] } };
+    const result = mergeClaudeSettingsOverlay(existing, overlay([entry("Bash", [{ type: "command", command: "guard", timeout: 20 }])]));
+    expect(result.added).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(result.settings).toBe(existing);
   });
 });

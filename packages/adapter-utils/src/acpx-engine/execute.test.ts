@@ -418,15 +418,23 @@ describe("shared ACPX engine runtime behavior", () => {
     try {
       const runConfig = { agent: "claude", agentCommand: "node ./fake-acp.js", cwd, stateDir: path.join(root, "state") };
       const baseline = await runExecutor(runConfig);
-      await fs.writeFile(overlayFile, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node guard", dedupeCommandMarker: "guard-marker" }] }] } }));
+      expect(baseline.result.exitCode).toBe(0);
+      const baselineSettings = await fs.readFile(settingsFile, "utf8");
+      expect(JSON.parse(baselineSettings).hooks).toBeUndefined();
+      const absentAgain = await runExecutor(runConfig);
+      expect(await fs.readFile(settingsFile, "utf8")).toBe(baselineSettings);
+      expect(absentAgain.result.exitCode).toBe(0);
+      await fs.writeFile(overlayFile, JSON.stringify({ dedupeCommandMarker: "guard-marker", hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node guard" }] }] } }));
       const applied = await runExecutor(runConfig);
       expect(JSON.parse(await fs.readFile(settingsFile, "utf8")).hooks.PreToolUse[0].hooks).toEqual([{ type: "command", command: "node guard" }]);
-      expect((applied.meta[0]?.commandNotes as string[]).some((note) => note.includes("Merged Claude settings overlay"))).toBe(true);
+      expect((applied.meta[0]?.commandNotes as string[]).some((note) => note === `Merged 1 hook entry from ${overlayFile} into hooks.PreToolUse (skipped 0 already present).`)).toBe(true);
       expect(applied.result.sessionParams?.configFingerprint).toBe(baseline.result.sessionParams?.configFingerprint);
 
       await fs.writeFile(overlayFile, "{");
       const invalid = await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd, stateDir: path.join(root, "state-invalid") });
       expect(invalid.logs.some(({ stream, text }) => stream === "stderr" && text.includes("Ignoring Claude settings overlay"))).toBe(true);
+      expect(invalid.logs.some(({ stream, text }) => stream === "stderr" && text.includes(`${overlayFile}:`) && text.endsWith("; settings written without it."))).toBe(true);
+      expect(invalid.result.exitCode).toBe(0);
 
       const malformedCwd = path.join(root, "malformed-existing");
       await fs.mkdir(path.join(malformedCwd, ".claude"), { recursive: true });
@@ -434,6 +442,7 @@ describe("shared ACPX engine runtime behavior", () => {
       await fs.writeFile(overlayFile, JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node guard" }] }] } }));
       const malformed = await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd: malformedCwd, stateDir: path.join(root, "state-malformed") });
       expect(malformed.logs.some(({ stream, text }) => stream === "stderr" && text.includes("Ignoring Claude settings overlay"))).toBe(true);
+      expect(malformed.result.exitCode).toBe(0);
       expect(JSON.parse(await fs.readFile(path.join(malformedCwd, ".claude", "settings.local.json"), "utf8")).hooks).toBe("x");
 
       await fs.rm(overlayFile);
@@ -447,7 +456,7 @@ describe("shared ACPX engine runtime behavior", () => {
       await fs.mkdir(remoteCwd, { recursive: true });
       const remoteExecutionCwd = "/workspace/remote";
       const remote = await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd: remoteCwd, stateDir: path.join(root, "state-remote") }, { executionTarget: { kind: "remote", transport: "ssh", remoteCwd: remoteExecutionCwd, spec: { host: "example.test", port: 22, username: "runner", remoteCwd: remoteExecutionCwd, remoteWorkspacePath: remoteExecutionCwd, privateKey: null, knownHosts: null, strictHostKeyChecking: true } } });
-      expect((remote.meta[0]?.commandNotes as string[]).some((note) => note.includes("Skipped Claude settings overlay on a remote execution target"))).toBe(true);
+      expect((remote.meta[0]?.commandNotes as string[]).some((note) => note === "Skipped Claude settings overlay on a remote execution target (hook commands use host paths)." )).toBe(true);
       expect(JSON.parse(await fs.readFile(path.join(remoteCwd, ".claude", "settings.local.json"), "utf8")).hooks).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();

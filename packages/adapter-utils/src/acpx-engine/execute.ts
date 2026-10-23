@@ -2198,11 +2198,14 @@ async function buildRuntime(input: {
       }, +${paperclipClaudeSettings.additionalDirectories.length} read root(s), +${paperclipClaudeSettings.allow.length} allow rule(s)).`,
     );
     if (paperclipClaudeSettings.overlay.status === "applied") {
-      skillCommandNotes.push(`Merged Claude settings overlay: added ${paperclipClaudeSettings.overlay.added}, skipped ${paperclipClaudeSettings.overlay.skipped}.`);
+      const count = paperclipClaudeSettings.overlay.added;
+      const entriesLabel = count === 1 ? "hook entry" : "hook entries";
+      skillCommandNotes.push(`Merged ${count} ${entriesLabel} from ${path.join(defaultPaperclipInstanceDir(), "companies", agent.companyId, "claude-settings-overlay.json")} into hooks.PreToolUse (skipped ${paperclipClaudeSettings.overlay.skipped} already present).`);
     } else if (paperclipClaudeSettings.overlay.status === "skipped") {
-      skillCommandNotes.push(`Skipped Claude settings overlay on a remote execution target (${paperclipClaudeSettings.overlay.reason}).`);
+      skillCommandNotes.push("Skipped Claude settings overlay on a remote execution target (hook commands use host paths).");
     } else if (paperclipClaudeSettings.overlay.status === "invalid") {
-      input.ctx.onLog("stderr", `[paperclip] Ignoring Claude settings overlay: ${paperclipClaudeSettings.overlay.reason ?? "invalid overlay"}`);
+      const overlayPath = path.join(defaultPaperclipInstanceDir(), "companies", agent.companyId, "claude-settings-overlay.json");
+      input.ctx.onLog("stderr", `[paperclip] Ignoring Claude settings overlay ${overlayPath}: ${paperclipClaudeSettings.overlay.reason ?? "invalid overlay"}; settings written without it.`);
     }
   } else if (acpxAgent === "codex") {
     // Step 2 — codex-home.seed: the codex managed-home + skills preparation.

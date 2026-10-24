@@ -3,7 +3,21 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
-import { recoveryService } from "./service.js";
+import { classifyAdapterFailureForRecovery, recoveryService } from "./service.js";
+
+describe("classifyAdapterFailureForRecovery", () => {
+  it("parses a December reset in the current year near year end", () => {
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "provider_quota",
+      error: "You've hit your weekly limit · resets Dec 30 at 7pm (Europe/Warsaw)",
+      resultJson: {},
+    }, new Date("2026-12-26T10:00:00.000Z"))).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-12-30T18:00:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+});
 
 const postgresSupport = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!postgresSupport.supported)("provider quota recovery monitor", () => {

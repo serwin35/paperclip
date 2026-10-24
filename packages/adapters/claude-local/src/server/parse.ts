@@ -519,7 +519,7 @@ function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: 
   if (match[1]) {
     const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(match[1].toLowerCase()) + 1;
     const day = Number(match[2]);
-    const year = match[3] ? Number(match[3]) : new Date(now.getTime() + 8 * 86400000).getUTCFullYear();
+    const year = match[3] ? Number(match[3]) : now.getUTCFullYear();
     const timeZone = normalizeResetTimeZone(timeZoneHint) ?? "UTC";
     retryAt = dateFromTimeZoneWallClock({ year, month, day, hour: hour24, minute, timeZone });
     if (!match[3] && retryAt && retryAt.getTime() <= now.getTime()) {

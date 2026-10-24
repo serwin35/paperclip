@@ -566,7 +566,7 @@ function parseProviderQuotaClockReset(error: string, now: Date) {
     const hour12 = Number(datedMatch[4]);
     const minute = Number(datedMatch[5] ?? "0");
     const hour = hour12 % 12 + ((datedMatch[6] ?? "").toLowerCase() === "p" ? 12 : 0);
-    const year = datedMatch[3] ? Number(datedMatch[3]) : new Date(now.getTime() + 8 * 86400000).getUTCFullYear();
+    const year = datedMatch[3] ? Number(datedMatch[3]) : now.getUTCFullYear();
     const rawZone = (datedMatch[7] ?? datedMatch[8] ?? "UTC").trim();
     const timeZone = /^(?:utc|gmt)$/i.test(rawZone) ? "UTC" : rawZone;
     if (month < 1 || !Number.isInteger(day) || day < 1 || day > 31 || hour12 < 1 || hour12 > 12 || minute > 59) return null;

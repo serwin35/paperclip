@@ -238,6 +238,23 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     await adapter.deferQuotaRecoveryRetry!({ runId: boundedNoFamily, provider: "anthropic", limit: 3, now: new Date(now.getTime() + 60_000) });
     expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, boundedNoFamily))).toHaveLength(1);
   });
+  it("counts only actual quota retries in queued and running states between promotion batches", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+    const sourceId = await seedRun({ companyId, agentId, status: "running" });
+    await db.update(heartbeatRuns).set({ status: "failed", errorCode: "provider_quota", resultJson: { errorFamily: "provider_quota" } }).where(eq(heartbeatRuns.id, sourceId));
+    const queuedId = await seedRun({ companyId, agentId, status: "queued", contextSnapshot: { retryOfRunId: sourceId }, scheduledRetryReason: "transient_failure" });
+    await db.update(heartbeatRuns).set({ retryOfRunId: sourceId }).where(eq(heartbeatRuns.id, queuedId));
+    const runningId = await seedRun({ companyId, agentId, status: "running", contextSnapshot: { retryOfRunId: sourceId }, scheduledRetryReason: "transient_failure" });
+    await db.update(heartbeatRuns).set({ retryOfRunId: sourceId }).where(eq(heartbeatRuns.id, runningId));
+    const inheritedId = await seedRun({ companyId, agentId, status: "queued", contextSnapshot: { retryOfRunId: sourceId, errorFamily: "provider_quota", providerQuotaRetryNotBefore: new Date().toISOString() }, scheduledRetryReason: "workspace_busy" });
+    await db.update(heartbeatRuns).set({ retryOfRunId: sourceId }).where(eq(heartbeatRuns.id, inheritedId));
+
+    await expect(createPostgresRunDispatchAdapter(db).listActiveQuotaRetries!()).resolves.toEqual([
+      { adapterType: "claude_local", activeCount: 2 },
+    ]);
+  });
+
 
   it("keeps one scheduled retry through cleanup and promotes it once after release", async () => {
     const f = await seedCleanupRetry();

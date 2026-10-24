@@ -10,6 +10,7 @@ import { createRunDispatch, type PostCommitEffect } from "../../modules/run-disp
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import * as legacy from "../heartbeat.js";
 import { createHeartbeatRunState } from "./run-state.js";
+import { quotaResetSpreadMs } from "../provider-quota-retry.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import * as extracted from "./retries.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
@@ -244,8 +245,7 @@ describePostgres("heartbeat retry module database wiring", () => {
     const result = await retries.scheduleBoundedRetryForRun(source, agent, { now, delayMs: 60_000 });
     expect(result.outcome).toBe("scheduled");
     if (result.outcome !== "scheduled") throw new Error("Expected retry");
-    expect(result.dueAt.getTime()).toBeGreaterThanOrEqual(resetAt.getTime() + 60_000);
-    expect(result.dueAt.getTime()).toBeLessThanOrEqual(resetAt.getTime() + 15 * 60_000);
+    expect(result.dueAt).toEqual(new Date(resetAt.getTime() + quotaResetSpreadMs(issue.id)));
     const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, run.id)).orderBy(heartbeatRuns.createdAt);
     expect(successor?.scheduledRetryAt?.toISOString()).toBe(result.dueAt.toISOString());
   });

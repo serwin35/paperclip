@@ -51,7 +51,7 @@ describe.skipIf(!postgresSupport.supported)("provider quota recovery monitor", (
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     expect(result).toMatchObject({ providerQuotaMonitored: 1, issueIds: [issueId] });
-    expect(issue?.monitorNextCheckAt?.toISOString()).toMatch(/^2026-10-28T18:0[1-9]:|^2026-10-28T18:1[0-5]:/);
+    expect(issue?.monitorNextCheckAt).toEqual(new Date(Date.parse("2026-10-28T18:00:00.000Z") + quotaResetSpreadMs(issueId)));
     expect(issue?.executionPolicy).toMatchObject({ monitor: { nextCheckAt: issue?.monitorNextCheckAt?.toISOString() } });
     expect(run?.resultJson).toMatchObject({ errorFamily: "provider_quota", retryNotBefore: "2026-10-28T18:00:00.000Z" });
   });

@@ -1,3 +1,4 @@
+Paperclip: GitHub capability_missing; continuing without managed credentials.
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues } from "@paperclipai/db";
@@ -234,7 +235,7 @@ describePostgres("heartbeat retry module database wiring", () => {
     return { companyId, agent, issue, run };
   }
 
-  it("adds stable spread to provider quota reset retries only", async () => {
+  it("adds stable spread to the persisted provider quota classification, including the known one-hour reserve", async () => {
     const { run, agent, issue } = await fixture();
     const resetAt = new Date(now.getTime() + 60 * 60_000);
     const source = { ...run, errorCode: "provider_quota", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, errorFamily: "provider_quota", retryNotBefore: resetAt.toISOString() } };

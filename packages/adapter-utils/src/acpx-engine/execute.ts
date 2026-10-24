@@ -178,6 +178,7 @@ import {
   type StartupStepMeasureOptions,
   type StartupTraceContext,
 } from "./startup-timing.js";
+import { mergeClaudeSettingsOverlay, readClaudeSettingsOverlay, type ClaudeSettingsOverlayResult } from "./claude-settings-overlay.js";
 
 const defaultModuleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_MANAGED_CODEX_SKILLS_MANIFEST = ".paperclip-managed-skills.json";
@@ -1639,6 +1640,7 @@ interface PaperclipClaudeSettingsResult {
   additionalDirectories: string[];
   defaultMode: string;
   overrodeDontAsk: boolean;
+  overlay: Pick<ClaudeSettingsOverlayResult, "status" | "added" | "skipped" | "reason"> | { status: "absent" | "skipped"; added: 0; skipped: 0; reason?: string };
 }
 
 function uniqueSorted(values: Array<string | null | undefined>): string[] {
@@ -1657,6 +1659,7 @@ async function writePaperclipClaudeSettings(input: {
   stateDir: string;
   agentHome: string;
   companyId: string;
+  executionTargetIsRemote: boolean;
 }): Promise<PaperclipClaudeSettingsResult> {
   const filePath = path.join(input.cwd, ".claude", "settings.local.json");
   const instanceRoot = defaultPaperclipInstanceDir();
@@ -1711,7 +1714,22 @@ async function writePaperclipClaudeSettings(input: {
     additionalDirectories: mergedAdditionalDirectories,
     defaultMode,
   };
-  const next: Record<string, unknown> = { ...existing, permissions: nextPermissions };
+  let next: Record<string, unknown> = { ...existing, permissions: nextPermissions };
+  let overlayResult: PaperclipClaudeSettingsResult["overlay"] = { status: "absent", added: 0, skipped: 0 };
+  try {
+    const overlayFile = await readClaudeSettingsOverlay(companyRoot);
+    if (overlayFile.status === "present") {
+      if (input.executionTargetIsRemote) {
+        overlayResult = { status: "skipped", added: 0, skipped: 0, reason: "remote execution target" };
+      } else {
+        const merged = mergeClaudeSettingsOverlay(next, overlayFile.raw);
+        overlayResult = { status: merged.status, added: merged.added, skipped: merged.skipped, reason: merged.reason };
+        if (merged.status === "applied") next = merged.settings;
+      }
+    }
+  } catch (error) {
+    overlayResult = { status: "invalid", added: 0, skipped: 0, reason: error instanceof Error ? error.message : String(error) };
+  }
   await writeFileAtomically({
     target: filePath,
     contents: `${JSON.stringify(next, null, 2)}\n`,
@@ -1723,6 +1741,7 @@ async function writePaperclipClaudeSettings(input: {
     additionalDirectories: mergedAdditionalDirectories,
     defaultMode,
     overrodeDontAsk,
+    overlay: overlayResult,
   };
 }
 
@@ -2167,12 +2186,23 @@ async function buildRuntime(input: {
       // still receives this run's actual AGENT_HOME.
       agentHome: asString(workspaceContext.agentHomeForPermissions, agentHome),
       companyId: agent.companyId,
+      executionTargetIsRemote,
     });
     skillCommandNotes.push(
       `Wrote Paperclip-managed Claude settings to ${paperclipClaudeSettings.filePath} (defaultMode=${paperclipClaudeSettings.defaultMode}${
         paperclipClaudeSettings.overrodeDontAsk ? "; overrode user dontAsk" : ""
       }, +${paperclipClaudeSettings.additionalDirectories.length} read root(s), +${paperclipClaudeSettings.allow.length} allow rule(s)).`,
     );
+    if (paperclipClaudeSettings.overlay.status === "applied") {
+      const count = paperclipClaudeSettings.overlay.added;
+      const entriesLabel = count === 1 ? "hook entry" : "hook entries";
+      skillCommandNotes.push(`Merged ${count} ${entriesLabel} from ${path.join(defaultPaperclipInstanceDir(), "companies", agent.companyId, "claude-settings-overlay.json")} into hooks.PreToolUse (skipped ${paperclipClaudeSettings.overlay.skipped} already present).`);
+    } else if (paperclipClaudeSettings.overlay.status === "skipped") {
+      skillCommandNotes.push("Skipped Claude settings overlay on a remote execution target (hook commands use host paths).");
+    } else if (paperclipClaudeSettings.overlay.status === "invalid") {
+      const overlayPath = path.join(defaultPaperclipInstanceDir(), "companies", agent.companyId, "claude-settings-overlay.json");
+      input.ctx.onLog("stderr", `[paperclip] Ignoring Claude settings overlay ${overlayPath}: ${paperclipClaudeSettings.overlay.reason ?? "invalid overlay"}; settings written without it.`);
+    }
   } else if (acpxAgent === "codex") {
     // Step 2 — codex-home.seed: the codex managed-home + skills preparation.
     // The nested skills.reconcile boundary (step 3) is timed inside via the

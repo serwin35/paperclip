@@ -101,6 +101,11 @@ export async function storeGitRestorePoint(input: {
   const objectKey = restorePointObjectKey(input.workspace.companyId, input.workspace.id, input.generation, id, input.checkout);
   const [ledger] = await input.db.transaction(async (tx) => {
     await notifyGitRestorePointWork(tx, `workspace:${input.workspace.id}`);
+    await tx.update(executionWorkspaceRestorePoints).set({ status: "superseded", updatedAt: new Date() })
+      .where(and(eq(executionWorkspaceRestorePoints.executionWorkspaceId, input.workspace.id),
+        eq(executionWorkspaceRestorePoints.generation, input.generation),
+        eq(executionWorkspaceRestorePoints.checkoutName, input.checkout ?? ""),
+        eq(executionWorkspaceRestorePoints.status, "pending")));
     return tx.insert(executionWorkspaceRestorePoints).values({
       companyId: input.workspace.companyId,
       executionWorkspaceId: input.workspace.id,
@@ -173,10 +178,12 @@ export async function restorePointHistoryUnchanged(ref: GitRestorePointRef, cwd:
   return ref.history === undefined || await restorePointHistoryDigest(cwd, signal) === ref.history;
 }
 
+const modesKey = (modes: Array<{ path: string; mode: number }>) => JSON.stringify(modes.map(entry => [entry.path, entry.mode]));
+
 export function restorePointSnapshotMatches(ref: GitRestorePointRef, snapshot: { head: string; index: string | null; worktree: string | null;
   ignored: string | null; modes: Array<{ path: string; mode: number }> }) {
   return snapshot.head === ref.head && snapshot.index === ref.index && snapshot.worktree === ref.worktree && snapshot.ignored === (ref.ignored ?? null)
-    && JSON.stringify(snapshot.modes) === JSON.stringify(ref.modes);
+    && modesKey(snapshot.modes) === modesKey(ref.modes);
 }
 
 export async function abandonGitRestorePointsByKey(db: Db, workspaceId: string, objectKeys: string[]) {
@@ -229,7 +236,7 @@ export async function loadGitRestorePoint(input: {
   const { manifest } = decodeRestorePointPayload(payload);
   if (manifest.head !== input.ref.head || manifest.index !== input.ref.index || manifest.worktree !== input.ref.worktree
     || (manifest.ignored ?? null) !== (input.ref.ignored ?? null)
-    || JSON.stringify(manifest.modes) !== JSON.stringify(input.ref.modes)) {
+    || modesKey(manifest.modes) !== modesKey(input.ref.modes)) {
     throw new RestorePointRestoreFailure("restore_point_manifest_mismatch");
   }
   return { payload, manifest };

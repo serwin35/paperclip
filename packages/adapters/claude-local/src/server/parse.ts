@@ -505,32 +505,37 @@ function nextClockTimeInTimeZone(input: {
 
 function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: string | null): Date | null {
   const normalized = clockText.trim().replace(/\s+/g, " ");
-  const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
+  const match = normalized.match(/^(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:,?\s+(\d{4}))?(?:,\s*|\s+)(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
 
-  const hour12 = Number.parseInt(match[1] ?? "", 10);
-  const minute = Number.parseInt(match[2] ?? "0", 10);
+  const hour12 = Number.parseInt(match[4] ?? "", 10);
+  const minute = Number.parseInt(match[5] ?? "0", 10);
   if (!Number.isInteger(hour12) || hour12 < 1 || hour12 > 12) return null;
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
-
   let hour24 = hour12 % 12;
-  if ((match[3] ?? "").toLowerCase() === "p") hour24 += 12;
+  if ((match[6] ?? "").toLowerCase() === "p") hour24 += 12;
+
+  let retryAt: Date | null = null;
+  if (match[1]) {
+    const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(match[1].toLowerCase()) + 1;
+    const day = Number(match[2]);
+    const year = match[3] ? Number(match[3]) : new Date(now.getTime() + 8 * 86400000).getUTCFullYear();
+    const timeZone = normalizeResetTimeZone(timeZoneHint) ?? "UTC";
+    retryAt = dateFromTimeZoneWallClock({ year, month, day, hour: hour24, minute, timeZone });
+    if (!match[3] && retryAt && retryAt.getTime() <= now.getTime()) {
+      retryAt = dateFromTimeZoneWallClock({ year: year + 1, month, day, hour: hour24, minute, timeZone });
+    }
+    if (!retryAt || retryAt.getTime() <= now.getTime() || retryAt.getTime() - now.getTime() > 8 * 86400000) return null;
+    return retryAt;
+  }
 
   if (timeZoneHint) {
-    const explicitRetryAt = nextClockTimeInTimeZone({
-      now,
-      hour: hour24,
-      minute,
-      timeZoneHint,
-    });
-    if (explicitRetryAt) return explicitRetryAt;
+    retryAt = nextClockTimeInTimeZone({ now, hour: hour24, minute, timeZoneHint });
+    if (retryAt) return retryAt;
   }
-
-  const retryAt = new Date(now);
+  retryAt = new Date(now);
   retryAt.setHours(hour24, minute, 0, 0);
-  if (retryAt.getTime() <= now.getTime()) {
-    retryAt.setDate(retryAt.getDate() + 1);
-  }
+  if (retryAt.getTime() <= now.getTime()) retryAt.setDate(retryAt.getDate() + 1);
   return retryAt;
 }
 

@@ -196,6 +196,49 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     return { companyId, agentId, issueId, sourceId, leaseId: lease!.id, runId, now };
   }
 
+  it("marks quota retries from the closed reason/source definition and defers them durably once", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+    const issueId = randomUUID();
+    const now = new Date("2026-10-24T12:00:00.000Z");
+    await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+    const seedCase = async (reason: string, sourceFamily: string | null, sourceCode: string | null, inherited = false, sourceRequired = true) => {
+      let sourceId: string | null = null;
+      if (sourceRequired) {
+        sourceId = await seedRun({ companyId, agentId, status: "running", now: new Date(now.getTime() - 60_000), contextSnapshot: { issueId } });
+        await db.update(heartbeatRuns).set({ status: "failed", errorCode: sourceCode, resultJson: sourceFamily ? { errorFamily: sourceFamily } : null }).where(eq(heartbeatRuns.id, sourceId));
+      }
+      const runId = await seedRun({ companyId, agentId, status: "scheduled_retry", now: new Date(now.getTime() - 1), contextSnapshot: { issueId, ...(inherited ? { errorFamily: "provider_quota", providerQuotaRetryNotBefore: now.toISOString() } : {}) }, scheduledRetryReason: reason });
+      await db.update(heartbeatRuns).set({ issueId, retryOfRunId: sourceId }).where(eq(heartbeatRuns.id, runId));
+      return runId;
+    };
+    const boundedNoFamily = await seedCase("transient_failure", null, "provider_quota");
+    const inheritedOnly = await seedCase("workspace_busy", "provider_quota", "provider_quota", true);
+    const closedListOnly = await seedCase("native_safe_replacement", "provider_quota", "provider_quota");
+    const staleFamily = await seedCase("transient_failure", "transient_upstream", "provider_quota");
+    const reviewQuota = await seedCase("execution_review_participant_recovery", "provider_quota", null);
+    const monitorQuota = await seedCase("provider_quota_recovery", null, null, false, false);
+
+    const adapter = createPostgresRunDispatchAdapter(db);
+    const due = await adapter.listDueRetries({ now, cutoff: null, limit: 50 });
+    const byId = new Map(due.map((run) => [run.runId, run]));
+    expect(byId.get(boundedNoFamily)).toMatchObject({ quotaRecovery: true, adapterType: "claude_local" });
+    expect(byId.get(reviewQuota)).toMatchObject({ quotaRecovery: true });
+    expect(byId.get(monitorQuota)).toMatchObject({ quotaRecovery: true });
+    expect(byId.get(inheritedOnly)?.quotaRecovery).toBe(false);
+    expect(byId.get(closedListOnly)?.quotaRecovery).toBe(false);
+    expect(byId.get(staleFamily)?.quotaRecovery).toBe(false);
+
+    expect(await adapter.deferQuotaRecoveryRetry!({ runId: boundedNoFamily, provider: "anthropic", limit: 3, now })).toBe(true);
+    const [deferred] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, boundedNoFamily));
+    expect(deferred?.scheduledRetryAt?.getTime()).toBeGreaterThanOrEqual(now.getTime() + 6 * 60_000);
+    expect(deferred?.scheduledRetryAt?.getTime()).toBeLessThanOrEqual(now.getTime() + 20 * 60_000);
+    expect(deferred?.contextSnapshot).toMatchObject({ scheduledRetryAt: deferred?.scheduledRetryAt?.toISOString() });
+    expect(deferred?.resultJson).toMatchObject({ quotaRecoveryWait: { provider: "anthropic", limit: 3 } });
+    await adapter.deferQuotaRecoveryRetry!({ runId: boundedNoFamily, provider: "anthropic", limit: 3, now: new Date(now.getTime() + 60_000) });
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, boundedNoFamily))).toHaveLength(1);
+  });
+
   it("keeps one scheduled retry through cleanup and promotes it once after release", async () => {
     const f = await seedCleanupRetry();
     let adapter = createPostgresRunDispatchAdapter(db);

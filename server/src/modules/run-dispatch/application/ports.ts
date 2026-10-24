@@ -7,7 +7,12 @@ import type {
 export type DueRetryRun = {
   runId: string;
   companyId: string;
+  quotaRecovery?: boolean;
+  adapterType?: string;
 };
+
+export type ActiveQuotaRetry = { adapterType: string; activeCount: number };
+
 
 export type ListDueRetriesInput = {
   now: Date;
@@ -26,6 +31,7 @@ export type EvaluateScheduledRetryGateInput = {
 export interface ScheduledRetryReader {
   evaluateScheduledRetryGate(input: EvaluateScheduledRetryGateInput): Promise<GateDecision>;
   listDueRetries(input: ListDueRetriesInput): Promise<DueRetryRun[]>;
+  listActiveQuotaRetries?(): Promise<ActiveQuotaRetry[]>;
 }
 
 export type PromoteOrCancelDueRetryInput = {
@@ -56,6 +62,7 @@ export type DispatchResolvedInteractionOutcome<T> =
 /** Semantic database operations; persistence rows and transaction handles stay inside the adapter. */
 export interface RunDispatchWriter {
   promoteOrCancelDueRetry(input: PromoteOrCancelDueRetryInput): Promise<PromoteScheduledRetryOutcome>;
+  deferQuotaRecoveryRetry?(input: { runId: string; provider: string; limit: number; now: Date }): Promise<boolean>;
   cancelStaleQueuedRun(input: CancelStaleQueuedRunInput): Promise<CancelStaleQueuedRunOutcome>;
   dispatchResolvedInteractionIfCurrent<T>(
     input: DispatchResolvedInteractionInput<T>,

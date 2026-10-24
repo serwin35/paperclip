@@ -72,6 +72,7 @@ export function createRunDispatch(db: Db, deps: RunDispatchDeps = {}) {
     promoteDueScheduledRetries: createPromoteDueScheduledRetries({
       reader: adapter,
       promoteScheduledRetry,
+      deferQuotaRecoveryRetry: adapter.deferQuotaRecoveryRetry?.bind(adapter),
     }),
     cancelStaleQueuedRun: createCancelStaleQueuedRun({
       writer: adapter,

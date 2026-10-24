@@ -234,6 +234,33 @@ describePostgres("heartbeat retry module database wiring", () => {
     return { companyId, agent, issue, run };
   }
 
+  it("adds stable spread to provider quota reset retries only", async () => {
+    const { run, agent, issue } = await fixture();
+    const resetAt = new Date(now.getTime() + 60 * 60_000);
+    const source = { ...run, errorCode: "provider_quota", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, errorFamily: "provider_quota", retryNotBefore: resetAt.toISOString() } };
+    await db.update(heartbeatRuns).set({ errorCode: source.errorCode, resultJson: source.resultJson }).where(eq(heartbeatRuns.id, run.id));
+    const { retries } = boundRetries();
+    const result = await retries.scheduleBoundedRetryForRun(source, agent, { now, delayMs: 60_000 });
+    expect(result.outcome).toBe("scheduled");
+    if (result.outcome !== "scheduled") throw new Error("Expected retry");
+    expect(result.dueAt.getTime()).toBeGreaterThanOrEqual(resetAt.getTime() + 60_000);
+    expect(result.dueAt.getTime()).toBeLessThanOrEqual(resetAt.getTime() + 15 * 60_000);
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, run.id)).orderBy(heartbeatRuns.createdAt);
+    expect(successor?.scheduledRetryAt?.toISOString()).toBe(result.dueAt.toISOString());
+  });
+
+  it("does not add quota spread to transient upstream retryNotBefore", async () => {
+    const { run, agent, issue } = await fixture();
+    const retryAt = new Date(now.getTime() + 60 * 60_000);
+    const source = { ...run, errorCode: "codex_transient_upstream", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, errorFamily: "transient_upstream", retryNotBefore: retryAt.toISOString() } };
+    await db.update(heartbeatRuns).set({ errorCode: source.errorCode, resultJson: source.resultJson }).where(eq(heartbeatRuns.id, run.id));
+    const { retries } = boundRetries();
+    const result = await retries.scheduleBoundedRetryForRun(source, agent, { now, delayMs: 60_000 });
+    expect(result).toMatchObject({ outcome: "scheduled", dueAt: retryAt });
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, run.id)).orderBy(heartbeatRuns.createdAt);
+    expect(successor?.scheduledRetryAt?.toISOString()).toBe(retryAt.toISOString());
+  });
+
   it("reuses one successor across concurrent factories and keeps writes committed before callbacks", async () => {
     const { run, agent, issue, companyId } = await fixture();
     const first = boundRetries(), second = boundRetries();

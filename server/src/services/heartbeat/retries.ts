@@ -44,6 +44,7 @@ import {
 } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { parseObject } from "../../adapters/utils.js";
+import { quotaResetSpreadMs } from "../provider-quota-retry.js";
 import { logActivity } from "../activity-log.js";
 import { readContinuationAttempt } from "../recovery/index.js";
 import { withRecoveryContext } from "../recovery/status-only-context.js";
@@ -551,14 +552,13 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     const schedule =
       transientRetryNotBefore &&
       transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
-        ? {
-            ...baseSchedule,
-            dueAt: transientRetryNotBefore,
-            delayMs: Math.max(
-              0,
-              transientRetryNotBefore.getTime() - now.getTime(),
-            ),
-          }
+        ? (() => {
+            const spread = transientRecovery?.errorFamily === "provider_quota"
+              ? quotaResetSpreadMs(run.issueId ?? run.id)
+              : 0;
+            const dueAt = new Date(transientRetryNotBefore.getTime() + spread);
+            return { ...baseSchedule, dueAt, delayMs: Math.max(0, dueAt.getTime() - now.getTime()) };
+          })()
         : baseSchedule;
 
     const requiresIssueGate =

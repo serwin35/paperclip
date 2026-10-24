@@ -467,6 +467,26 @@ describe("isClaudeImageProcessingError", () => {
 });
 
 describe("extractClaudeRetryNotBefore", () => {
+  it("parses a dated reset with the post-DST Warsaw offset", () => {
+    const now = new Date("2026-10-24T06:07:19.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage: "You've hit your weekly limit · resets Oct 28 at 7pm (Europe/Warsaw)" }, now)?.toISOString()).toBe("2026-10-28T18:00:00.000Z");
+  });
+
+  it("parses comma dates and rolls an omitted year into the next calendar year", () => {
+    const now = new Date("2026-10-24T06:07:19.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage: "You've hit your limit · resets Oct 28, 7:30pm (UTC)" }, now)?.toISOString()).toBe("2026-10-28T19:30:00.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage: "You've hit your limit · resets Jan 2 at 9am (UTC)" }, new Date("2026-12-30T00:00:00.000Z"))?.toISOString()).toBe("2027-01-02T09:00:00.000Z");
+  });
+  it("keeps a December reset in the current year when it is within the next eight days", () => {
+    const now = new Date("2026-12-26T10:00:00.000Z");
+    expect(extractClaudeRetryNotBefore({ errorMessage: "You've hit your limit · resets Dec 30 at 7pm (Europe/Warsaw)" }, now)?.toISOString()).toBe("2026-12-30T18:00:00.000Z");
+  });
+
+
+  it.each(["Oct 28, 2027 at 7pm (UTC)", "Oct 20 at 7pm (UTC)", "Foo 99 at 7pm (UTC)"])("rejects invalid or out-of-range dated reset %s", (reset) => {
+    expect(extractClaudeRetryNotBefore({ errorMessage: `You've hit your limit · resets ${reset}` }, new Date("2026-10-24T06:07:19.000Z"))).toBeNull();
+  });
+
   it("parses the 'resets 4pm' hint in its explicit timezone", () => {
     const now = new Date("2026-04-22T15:15:00.000Z");
     const extracted = extractClaudeRetryNotBefore(

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, caseHandoffs, cases, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { agents, agentWakeupRequests, caseHandoffs, cases, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import * as usageReceipts from "../usage-receipts.js";
 import { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
+import { issueService } from "../issues.js";
 import { UnresolvedWorkspaceBaseRefError } from "../workspace-runtime.js";
 import { LegacyControllerLeaseLostError } from "../legacy-controller-lease.js";
 import { requestedRunCancellation } from "../run-cancellation.js";
@@ -152,6 +153,54 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledOnce();
     expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(f.agent.id, "succeeded", null, expect.any(Object));
   });
+
+  it("does not write a repeated provider quota notice after reading the prior comment from Postgres", async () => {
+    const notice = "ACP agent reported a terminal limit failure. Provider diagnostics are available in the run record.";
+    const f = await fixture({ errorCode: "provider_quota", resultJson: { errorFamily: "provider_quota", summary: notice } });
+    const [issue] = await db.insert(issues).values({ companyId: f.agent.companyId, title: "Quota task", status: "in_progress", assigneeAgentId: f.agent.id }).returning();
+    await issueService(db).addComment(issue.id, notice, { agentId: f.agent.id }, { authorType: "agent" });
+    f.input.issueId = issue.id;
+    f.input.issueRef = issue;
+    f.input.adapterResult.errorCode = "provider_quota";
+    f.input.adapterResult.errorMessage = "Provider quota reached";
+    f.input.adapterResult.resultJson = { errorFamily: "provider_quota", summary: notice };
+
+    await f.completion.completeRun(f.input);
+
+    expect(f.deps.issuesSvc.addComment).not.toHaveBeenCalled();
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(1);
+    expect(await read(f.run.id)).toMatchObject({ resultJson: { presentationDecision: { commentAction: "none", reasonCodes: expect.arrayContaining(["provider_quota_notice_deduplicated"]) } } });
+  });
+  it.each([null, "A different agent comment"] as const)("writes a quota notice when the prior comment is %s", async priorComment => {
+    const notice = "ACP agent reported a terminal limit failure. Provider diagnostics are available in the run record.";
+    const f = await fixture({ errorCode: "provider_quota", resultJson: { errorFamily: "provider_quota", summary: notice } });
+    const [issue] = await db.insert(issues).values({ companyId: f.agent.companyId, title: "First quota failure", status: "in_progress", assigneeAgentId: f.agent.id }).returning();
+    if (priorComment) await issueService(db).addComment(issue.id, priorComment, { agentId: f.agent.id }, { authorType: "agent" });
+    f.input.issueId = issue.id;
+    f.input.issueRef = issue;
+    f.input.adapterResult.errorCode = "provider_quota";
+    f.input.adapterResult.errorMessage = "Provider quota reached";
+    f.input.adapterResult.resultJson = { errorFamily: "provider_quota", summary: notice };
+
+    await f.completion.completeRun(f.input);
+
+    expect(f.deps.issuesSvc.addComment).toHaveBeenCalledWith(issue.id, notice, expect.anything(), expect.anything());
+  });
+
+  it("does not apply quota notice deduplication to a different failure type", async () => {
+    const f = await fixture({ errorCode: "adapter_failed", resultJson: { errorFamily: "transient_upstream" } });
+    const [issue] = await db.insert(issues).values({ companyId: f.agent.companyId, title: "Transient failure", status: "in_progress", assigneeAgentId: f.agent.id }).returning();
+    f.input.issueId = issue.id;
+    f.input.issueRef = issue;
+    f.input.adapterResult.errorCode = "adapter_failed";
+    f.input.adapterResult.errorMessage = "Upstream unavailable";
+    f.input.adapterResult.resultJson = { errorFamily: "transient_upstream" };
+
+    await f.completion.failRun(f.failure(new Error("Upstream unavailable")));
+
+    expect(f.deps.issuesSvc.addComment).not.toHaveBeenCalled();
+  });
+
 
   it.each([
     { timedOut: true, expected: "timed_out", errorCode: "timeout" },

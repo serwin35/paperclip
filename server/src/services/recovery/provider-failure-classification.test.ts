@@ -58,6 +58,16 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  it("retains the known persisted one-hour reserve classification as a reset timestamp", () => {
+    const now = new Date("2026-07-15T20:00:00.000Z");
+    const reserve = new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS);
+    expect(classifyAdapterFailureForRecovery({
+      errorCode: "provider_quota",
+      error: "ACP agent reported a terminal limit failure.",
+      resultJson: { retryNotBefore: reserve.toISOString() },
+    }, now)).toEqual({ kind: "provider_quota", retryAt: reserve, parsedResetTime: true });
+  });
+
   it("uses the existing backoff for a typed ACP quota failure with no reset timestamp", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     expect(classifyAdapterFailureForRecovery({
@@ -84,6 +94,15 @@ describe("classifyAdapterFailureForRecovery", () => {
       retryAt: new Date("2026-07-15T21:30:00.000Z"),
       parsedResetTime: true,
     });
+  });
+
+  it("parses Claude's dated weekly reset after the Warsaw daylight-saving transition", () => {
+    const classification = classifyAdapterFailureForRecovery({
+      errorCode: "provider_quota",
+      error: "You've hit your weekly limit · resets Oct 28 at 7pm (Europe/Warsaw)",
+      resultJson: null,
+    }, new Date("2026-10-24T06:07:19.000Z"));
+    expect(classification).toEqual({ kind: "provider_quota", retryAt: new Date("2026-10-28T18:00:00.000Z"), parsedResetTime: true });
   });
 
   it("uses the default recovery backoff when quota reset time is absent", () => {

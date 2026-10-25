@@ -1,4 +1,3 @@
-Paperclip: GitHub capability_missing; continuing without managed credentials.
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issues } from "@paperclipai/db";

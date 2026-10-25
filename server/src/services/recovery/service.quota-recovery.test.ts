@@ -1,4 +1,3 @@
-Paperclip: GitHub capability_missing; continuing without managed credentials.
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";

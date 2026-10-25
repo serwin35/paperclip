@@ -109,6 +109,38 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classification).toEqual({ kind: "provider_quota", retryAt: new Date("2026-10-28T18:00:00.000Z"), parsedResetTime: true });
   });
 
+  it("parses dated UTC reset clocks and falls back for invalid dates", () => {
+    const classify = (error: string, now: string) => classifyAdapterFailureForRecovery({
+      errorCode: "provider_quota",
+      error,
+      resultJson: null,
+    }, new Date(now));
+
+    expect(classify("resets Oct 28, 7:30pm (UTC)", "2026-10-24T06:07:19.000Z")).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-10-28T19:30:00.000Z"),
+      parsedResetTime: true,
+    });
+    expect(classify("resets Jan 2 at 9am (UTC)", "2026-12-30T00:00:00.000Z")).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2027-01-02T09:00:00.000Z"),
+      parsedResetTime: true,
+    });
+
+    for (const [error, now] of [
+      ["resets Nov 10 at 7pm (UTC)", "2026-10-24T06:07:19.000Z"],
+      ["resets Oct 20 at 7pm (UTC)", "2026-10-24T06:07:19.000Z"],
+      ["resets Foo 99 at 7pm", "2026-10-24T06:07:19.000Z"],
+    ]) {
+      const classification = classify(error, now);
+      expect(classification).toEqual({
+        kind: "provider_quota",
+        retryAt: new Date(new Date(now).getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS),
+        parsedResetTime: false,
+      });
+    }
+  });
+
   it("uses the default recovery backoff when quota reset time is absent", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     const classification = classifyAdapterFailureForRecovery({

@@ -84,7 +84,8 @@ describe("Claude settings overlay", () => {
   });
 
   it("does not write comment or dedupe metadata to settings", () => {
-    const result = mergeClaudeSettingsOverlay({}, JSON.stringify({ $comment: "private note", hooks: { PreToolUse: [entry("Bash", [hook("guard", { dedupeCommandMarker: "guard-marker" })])] } }));
+    const result = mergeClaudeSettingsOverlay({}, JSON.stringify({ $comment: "private note", dedupeCommandMarker: "guard-marker", hooks: { PreToolUse: [entry("Bash", [hook("guard-marker")])] } }));
+    expect(result.status).toBe("applied");
     expect(JSON.stringify(result.settings)).not.toContain("$comment");
     expect(JSON.stringify(result.settings)).not.toContain("dedupeCommandMarker");
   });
@@ -109,6 +110,22 @@ describe("Claude settings overlay", () => {
     expect(result.added).toBe(0);
     expect(result.skipped).toBe(2);
     expect(result.settings).toBe(strict);
+  });
+
+  it("skips only overlay entries that themselves contain the marker", () => {
+    const marker = "/command-guard/guard.mjs";
+    const existing = { hooks: { PreToolUse: [entry("Bash", [hook(`node ${marker} --strict`)])] } };
+    const raw = JSON.stringify({ dedupeCommandMarker: marker, hooks: { PreToolUse: [
+      entry("Bash", [hook(`node ${marker} --scope=agents`)]),
+      entry("Bash", [hook("echo audit")]),
+    ] } });
+    const result = mergeClaudeSettingsOverlay(existing, raw);
+    expect(result.added).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(result.settings).toEqual({ hooks: { PreToolUse: [
+      entry("Bash", [hook(`node ${marker} --strict`)]),
+      entry("Bash", [hook("echo audit")]),
+    ] } });
   });
 
   it("compares hook entries canonically regardless of object key order", () => {

@@ -2,7 +2,7 @@ import { hasConversationContinuationPolicy } from "../../../services/conversatio
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { validateReconstructedWorkspaceDispatch } from "../../../services/native-runtime/native-workspace-reconstruction.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
-import { and, asc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
+import { aliasedTable, and, asc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -21,6 +21,7 @@ import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON } from "@paperclipai/shared";
 import { withAccountingTransaction } from "../../../services/accounting-transaction.js";
 import type { ActivityPublication } from "../../../services/activity-log.js";
 import { parseObject } from "../../../adapters/utils.js";
+import { quotaResetSpreadMs } from "../../../services/provider-quota-retry.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
@@ -501,27 +502,74 @@ export function createPostgresRunDispatchAdapter(
   }
 
   async function listDueRetries(input: ListDueRetriesInput): Promise<DueRetryRun[]> {
-    const rows = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, input.now),
-          input.cutoff ? gte(heartbeatRuns.createdAt, input.cutoff) : undefined,
-        ),
-      )
-      .orderBy(
-        asc(heartbeatRuns.scheduledRetryAt),
-        asc(heartbeatRuns.createdAt),
-        asc(heartbeatRuns.id),
-      )
+    const sourceRun = aliasedTable(heartbeatRuns, "quota_retry_source");
+    const isQuotaRecovery = sql<boolean>`(${heartbeatRuns.scheduledRetryReason} = 'provider_quota_recovery' OR (
+      ${heartbeatRuns.scheduledRetryReason} IN ('transient_failure', 'execution_review_participant_recovery') AND
+      (${sourceRun.resultJson}->>'errorFamily' = 'provider_quota' OR
+       (nullif(${sourceRun.resultJson}->>'errorFamily', '') IS NULL AND ${sourceRun.errorCode} = 'provider_quota'))
+    ))`;
+    return db.select({
+      runId: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      adapterType: agents.adapterType,
+      quotaRecovery: isQuotaRecovery,
+    }).from(heartbeatRuns)
+      .leftJoin(sourceRun, eq(sourceRun.id, heartbeatRuns.retryOfRunId))
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(and(
+        eq(heartbeatRuns.status, "scheduled_retry"),
+        lte(heartbeatRuns.scheduledRetryAt, input.now),
+        input.cutoff ? gte(heartbeatRuns.createdAt, input.cutoff) : undefined,
+      ))
+      .orderBy(asc(heartbeatRuns.scheduledRetryAt), asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
       .limit(input.limit);
+  }
 
-    return rows.map((row) => ({
-      runId: row.id,
-      companyId: row.companyId,
-    }));
+  async function listActiveQuotaRetries() {
+    const sourceRun = aliasedTable(heartbeatRuns, "active_quota_retry_source");
+    const isQuotaRecovery = sql<boolean>`(${heartbeatRuns.scheduledRetryReason} = 'provider_quota_recovery' OR (
+      ${heartbeatRuns.scheduledRetryReason} IN ('transient_failure', 'execution_review_participant_recovery') AND
+      (${sourceRun.resultJson}->>'errorFamily' = 'provider_quota' OR
+       (nullif(${sourceRun.resultJson}->>'errorFamily', '') IS NULL AND ${sourceRun.errorCode} = 'provider_quota'))
+    ))`;
+    return db.select({ adapterType: agents.adapterType, activeCount: sql<number>`count(*)::int` }).from(heartbeatRuns)
+      .leftJoin(sourceRun, eq(sourceRun.id, heartbeatRuns.retryOfRunId))
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(and(inArray(heartbeatRuns.status, ["queued", "running"]), isQuotaRecovery))
+      .groupBy(agents.adapterType);
+  }
+
+  async function deferQuotaRecoveryRetry(input: { runId: string; provider: string; limit: number; now: Date }) {
+    return db.transaction(async (tx) => {
+      const run = await tx.select().from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.status, "scheduled_retry")))
+        .limit(1).then((rows) => rows[0] ?? null);
+      if (!run) return false;
+      const oldWait = parseObject(parseObject(run.resultJson).quotaRecoveryWait);
+      const scheduledRetryAt = new Date(input.now.getTime() + 5 * 60_000 + quotaResetSpreadMs(run.issueId ?? run.id));
+      const contextSnapshot = { ...parseObject(run.contextSnapshot), scheduledRetryAt: scheduledRetryAt.toISOString() };
+      const resultJson = { ...parseObject(run.resultJson), quotaRecoveryWait: { provider: input.provider, limit: input.limit } };
+      const [updated] = await tx.update(heartbeatRuns).set({
+        scheduledRetryAt,
+        contextSnapshot,
+        resultJson,
+        updatedAt: input.now,
+      }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "scheduled_retry"))).returning({ id: heartbeatRuns.id });
+      if (!updated) return false;
+      if (oldWait.provider !== input.provider || oldWait.limit !== input.limit) {
+        await appendHeartbeatRunEvent(tx as unknown as Db, {
+          companyId: run.companyId,
+          runId: run.id,
+          agentId: run.agentId,
+          eventType: "lifecycle",
+          stream: "system",
+          level: "info",
+          message: "Provider quota retry deferred by the per-provider concurrency limit",
+          payload: { provider: input.provider, limit: input.limit, scheduledRetryAt: scheduledRetryAt.toISOString() },
+        });
+      }
+      return true;
+    });
   }
 
   async function loadStalenessFacts(
@@ -1307,6 +1355,8 @@ export function createPostgresRunDispatchAdapter(
   return {
     evaluateScheduledRetryGate,
     listDueRetries,
+    listActiveQuotaRetries,
+    deferQuotaRecoveryRetry,
     cancelStaleQueuedRun,
     dispatchResolvedInteractionIfCurrent,
     promoteOrCancelDueRetry,

@@ -14,8 +14,8 @@ import { accountRunCost } from "../run-cost-accounting.js";
 import { isConversation, settleConversationTurn } from "../agent-conversations.js";
 import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
 import { isWorkspaceGitScanError } from "../workspace-git-operation-scheduler.js";
-import { and, eq, sql } from "drizzle-orm";
-import { heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { HttpError } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import { normalizeResponsibleUserDenialCode } from "../responsible-user-denial-run-outcomes.js";
@@ -831,6 +831,19 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           presentationDecision.commentAction === "create" &&
           resolved.text
         ) {
+          const latestAgentComment = finalizedRun.status === "failed" &&
+            readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota"
+            ? await db.select({ body: issueComments.body }).from(issueComments)
+                .where(and(eq(issueComments.issueId, issueId), eq(issueComments.authorAgentId, agent.id), isNull(issueComments.deletedAt)))
+                .orderBy(desc(issueComments.createdAt)).limit(1).then((rows) => rows[0] ?? null)
+            : null;
+          if (latestAgentComment?.body === resolved.text) {
+            presentationDecision = {
+              ...presentationDecision,
+              commentAction: "none",
+              reasonCodes: [...presentationDecision.reasonCodes, "provider_quota_notice_deduplicated"],
+            };
+          } else {
           // The presentation resolver exposes only the final assistant
           // surface selected from completed final messages or accepted
           // semantic results. For an exactly bound external-chat run,
@@ -876,6 +889,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               presentationSource: presentationDecision.chosenSource,
             },
           }));
+          }
         } else if (presentationDecision.commentAction === "create") {
           presentationDecision = {
             ...presentationDecision,

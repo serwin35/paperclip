@@ -1,5 +1,6 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
+import { quotaResetSpreadMs } from "../provider-quota-retry.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
@@ -558,6 +559,40 @@ export type AdapterFailureRecoveryClassification =
   | null;
 
 function parseProviderQuotaClockReset(error: string, now: Date) {
+  const datedMatch = error.match(/\bresets?\s+(?:at\s+)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:,?\s+(\d{4}))?(?:,?\s+at|,)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?\s*(?:\(([^)]+)\)|\s+([A-Z]{2,5}))?/i);
+  if (datedMatch) {
+    const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf((datedMatch[1] ?? "").toLowerCase()) + 1;
+    const day = Number(datedMatch[2]);
+    const hour12 = Number(datedMatch[4]);
+    const minute = Number(datedMatch[5] ?? "0");
+    const hour = hour12 % 12 + ((datedMatch[6] ?? "").toLowerCase() === "p" ? 12 : 0);
+    const year = datedMatch[3] ? Number(datedMatch[3]) : now.getUTCFullYear();
+    const rawZone = (datedMatch[7] ?? datedMatch[8] ?? "UTC").trim();
+    const timeZone = /^(?:utc|gmt)$/i.test(rawZone) ? "UTC" : rawZone;
+    if (month < 1 || !Number.isInteger(day) || day < 1 || day > 31 || hour12 < 1 || hour12 > 12 || minute > 59) return null;
+    const toWallClock = (targetYear: number): Date | null => {
+      let candidate = new Date(Date.UTC(targetYear, month - 1, day, hour, minute));
+      const target = Date.UTC(targetYear, month - 1, day, hour, minute);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(candidate).map(part => [part.type, part.value]));
+        const actual = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+        const adjustment = target - actual;
+        if (!adjustment) break;
+        candidate = new Date(candidate.getTime() + adjustment);
+      }
+      const parts = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(candidate);
+      const actual = Object.fromEntries(parts.map(part => [part.type, part.value]));
+      if (Number(actual.year) !== targetYear || Number(actual.month) !== month || Number(actual.day) !== day || Number(actual.hour) !== hour || Number(actual.minute) !== minute) return null;
+      return candidate;
+    };
+    try {
+      let parsed = toWallClock(year);
+      if (!datedMatch[3] && (!parsed || parsed.getTime() <= now.getTime())) parsed = toWallClock(year + 1);
+      if (!parsed) return null;
+      if (parsed.getTime() <= now.getTime() || parsed.getTime() - now.getTime() > 8 * 86400000) return null;
+      return parsed;
+    } catch { return null; }
+  }
   const match = error.match(
     /(?:try again at|resets?(?:\s+at)?)\s+(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m\.?)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i,
   );
@@ -2654,9 +2689,9 @@ export function recoveryService(
     ) {
       const parsed = new Date(raw);
       if (!Number.isNaN(parsed.getTime()) && parsed.getTime() > now.getTime())
-        return parsed;
+        return { retryAt: parsed, parsedResetTime: true };
     }
-    return new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS);
+    return { retryAt: new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS), parsedResetTime: false };
   }
 
   async function ensureProviderQuotaWaitRecoveryMonitor(input: {
@@ -2682,7 +2717,10 @@ export function recoveryService(
     if (existing) return existing;
 
     const now = new Date();
-    const retryAt = readProviderQuotaRetryAt(input.latestRun, now);
+    const retry = readProviderQuotaRetryAt(input.latestRun, now);
+    const retryAt = retry.parsedResetTime
+      ? new Date(retry.retryAt.getTime() + quotaResetSpreadMs(input.issue.id))
+      : retry.retryAt;
     return database.transaction(async (tx) => {
       const wakeup = await tx
         .insert(agentWakeupRequests)
@@ -2697,7 +2735,7 @@ export function recoveryService(
               issueId: input.issue.id,
               retryOfRunId: input.latestRun?.id ?? null,
               retryReason: "provider_quota_recovery",
-              providerQuotaRetryNotBefore: retryAt.toISOString(),
+              providerQuotaRetryNotBefore: retry.retryAt.toISOString(),
             },
             "normal_model",
           ),
@@ -2730,7 +2768,7 @@ export function recoveryService(
               taskId: input.issue.id,
               wakeReason: "provider_quota_recovery",
               retryReason: "provider_quota_recovery",
-              providerQuotaRetryNotBefore: retryAt.toISOString(),
+              providerQuotaRetryNotBefore: retry.retryAt.toISOString(),
             },
             "normal_model",
           ),
@@ -4375,6 +4413,9 @@ export function recoveryService(
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,
     );
+    const nextCheckAt = input.classification.parsedResetTime
+      ? new Date(input.classification.retryAt.getTime() + quotaResetSpreadMs(input.issue.id))
+      : input.classification.retryAt;
     const retryTargetDescription =
       input.issue.status === "in_review"
         ? "the active review participant"
@@ -4386,7 +4427,7 @@ export function recoveryService(
         stages: [],
       }),
       monitor: {
-        nextCheckAt: input.classification.retryAt.toISOString(),
+        nextCheckAt: nextCheckAt.toISOString(),
         notes: input.classification.parsedResetTime
           ? `Provider usage quota reached; retry ${retryTargetDescription} at the provider reset time.`
           : `Provider usage quota reached; retry ${retryTargetDescription} after the default recovery backoff.`,
@@ -4428,7 +4469,7 @@ export function recoveryService(
         source: "recovery.provider_quota",
         latestRunId: input.latestRun.id,
         errorCode: "provider_quota",
-        nextCheckAt: input.classification.retryAt.toISOString(),
+        nextCheckAt: nextCheckAt.toISOString(),
         parsedResetTime: input.classification.parsedResetTime,
         targetAgentId,
       },

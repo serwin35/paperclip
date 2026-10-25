@@ -107,6 +107,131 @@ describe("createPromoteScheduledRetry", () => {
 });
 
 describe("createPromoteDueScheduledRetries", () => {
+  it("limits marked retries by provider and counts earlier promotions in the same sweep", async () => {
+    const dueRuns = Array.from({ length: 8 }, (_, i) => ({ runId: `quota-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    const reader = Object.assign(fakeReader(dueRuns), { async listActiveQuotaRetries() { return []; } });
+    const deferred: unknown[] = [];
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: vi.fn(async (input) => { deferred.push(input); return true; }) });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: writer.deferQuotaRecoveryRetry })({ cutoff: null, now: new Date("2026-10-24T00:00:00.000Z") });
+      expect(result.promoted).toBe(3);
+      expect(writer.promoteCalls).toHaveLength(3);
+      expect(deferred).toHaveLength(5);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("reserves only the remaining provider slots when a retry is already running", async () => {
+    const dueRuns = Array.from({ length: 5 }, (_, i) => ({ runId: `quota-active-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    const reader = Object.assign(fakeReader(dueRuns), { async listActiveQuotaRetries() { return [{ adapterType: "claude_local", activeCount: 1 }]; } });
+    const deferred = vi.fn(async () => true);
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: deferred });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: deferred })({ cutoff: null });
+      expect(result.promoted).toBe(2);
+      expect(deferred).toHaveBeenCalledTimes(3);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("does not apply quota pacing to excluded retries or unpaced adapters", async () => {
+    const dueRuns = [
+      { runId: "ordinary-inherited-family", companyId: "company-1", quotaRecovery: false, adapterType: "claude_local" },
+      { runId: "native-replacement", companyId: "company-1", quotaRecovery: false, adapterType: "claude_local" },
+      { runId: "unpaced-quota-source", companyId: "company-1", quotaRecovery: true, adapterType: "custom_adapter" },
+    ];
+    const reader = Object.assign(fakeReader(dueRuns), { async listActiveQuotaRetries() { return [{ adapterType: "claude_local", activeCount: 3 }]; } });
+    const deferred = vi.fn(async () => true);
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: deferred });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: deferred })({ cutoff: null });
+      expect(result.promoted).toBe(3);
+      expect(deferred).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("disables the quota concurrency limit when configured to zero", async () => {
+    const dueRuns = Array.from({ length: 5 }, (_, i) => ({ runId: `quota-zero-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    const reader = Object.assign(fakeReader(dueRuns), { async listActiveQuotaRetries() { return []; } });
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: vi.fn(async () => true) });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "0";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: writer.deferQuotaRecoveryRetry })({ cutoff: null });
+      expect(result.promoted).toBe(5);
+      expect(writer.deferQuotaRecoveryRetry).not.toHaveBeenCalled();
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("keeps newer ordinary retries reachable after deferring older quota retries", async () => {
+    let dueRuns = Array.from({ length: 60 }, (_, i) => ({ runId: `quota-backlog-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    dueRuns.push({ runId: "ordinary-newest", companyId: "company-1", quotaRecovery: false, adapterType: "claude_local" });
+    let active = 0;
+    const reader = Object.assign(fakeReader(), {
+      async listDueRetries(input: { limit: number }) { return dueRuns.slice(0, input.limit); },
+      async listActiveQuotaRetries() { return [{ adapterType: "claude_local", activeCount: active }]; },
+    });
+    const writer = fakeWriter({
+      async promoteOrCancelDueRetry(input) {
+        active += 1;
+        dueRuns = dueRuns.filter((run) => run.runId !== input.runId);
+        return { outcome: "promoted", postCommitEffects: [] };
+      },
+      async deferQuotaRecoveryRetry(input) {
+        dueRuns = dueRuns.filter((run) => run.runId !== input.runId);
+        return true;
+      },
+    });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const promote = createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: writer.deferQuotaRecoveryRetry });
+      await promote({ cutoff: null });
+      const next = await promote({ cutoff: null });
+      expect(next.runIds).toContain("ordinary-newest");
+      expect(dueRuns.some((run) => run.runId === "ordinary-newest")).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("serializes overlapping sweeps so they cannot exceed the per-provider limit", async () => {
+    const dueRuns = Array.from({ length: 10 }, (_, i) => ({ runId: `quota-race-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    let active = 0;
+    const reader = Object.assign(fakeReader(dueRuns), { async listActiveQuotaRetries() { return Array.from({ length: active }, () => ({ adapterType: "claude_local" })); } });
+    const writer = fakeWriter({
+      async promoteOrCancelDueRetry(input) { active += 1; return { outcome: "promoted", postCommitEffects: [] }; },
+      async deferQuotaRecoveryRetry() { return true; },
+    });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const promote = createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: writer.deferQuotaRecoveryRetry });
+      const results = await Promise.all([promote({ cutoff: null }), promote({ cutoff: null })]);
+      expect(results.reduce((sum, result) => sum + result.promoted, 0)).toBe(3);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
   it("keeps due order and caps a sweep at 50 runs", async () => {
     const dueRuns = Array.from({ length: 75 }, (_, i) => ({
       runId: `run-${i}`,

@@ -28,13 +28,14 @@ async function executeFailure(
   createRuntime?: AcpxEngineExecutorOptions["createRuntime"],
   extraEnv: Record<string, string> = {},
   details?: string,
+  executionNow = now,
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-acp-quota-"));
   roots.push(root);
   const failureFile = path.join(root, "failure.json");
   await fs.writeFile(failureFile, JSON.stringify({ title, category, details }));
   const logs: string[] = [];
-  const execute = createClaudeAcpExecutor({ now: () => now.getTime(), createRuntime });
+  const execute = createClaudeAcpExecutor({ now: () => executionNow.getTime(), createRuntime });
   const result = await execute({
     runId: "typed-quota",
     agent: { id: "quota-agent", companyId: "quota-company" },
@@ -121,6 +122,16 @@ it.each([
   const transcript = logs.split("\n").flatMap((line) => parseAcpxStdoutLine(line, "2026-07-15T20:00:00Z"));
   expect(transcript).toContainEqual(expect.objectContaining({ kind: "stderr", text: result.errorMessage }));
   expect(transcript.some((entry) => entry.kind === "assistant")).toBe(false);
+});
+
+it("extracts Claude's dated weekly reset from a real ACP failure", async () => {
+  const title = "You've hit your weekly limit · resets Oct 28 at 7pm (Europe/Warsaw)";
+  const { result } = await executeFailure(title, "limit", "oneshot", undefined, {}, undefined, new Date("2026-10-24T06:07:19.000Z"));
+  expect(result).toMatchObject({
+    errorCode: "provider_quota",
+    errorFamily: "provider_quota",
+    retryNotBefore: "2026-10-28T18:00:00.000Z",
+  });
 });
 
 it("classifies quota without a reset time for the existing recovery backoff", async () => {

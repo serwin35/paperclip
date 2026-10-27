@@ -11,7 +11,20 @@ export type DueRetryRun = {
   adapterType?: string;
 };
 
-export type ActiveQuotaRetry = { adapterType: string; activeCount: number };
+/**
+ * Quota recovery retries of one agent that may hold a provider slot. A queued
+ * retry holds one only while its agent has a free run slot: one queued behind
+ * the agent's own concurrency limit spends no quota and must not starve the
+ * retries of other agents.
+ */
+export type ActiveQuotaRetry = {
+  adapterType: string;
+  /** Running quota retries. Fakes without the agent fields count every active retry here. */
+  activeCount?: number;
+  queuedCount?: number;
+  agentRunningCount?: number;
+  agentMaxConcurrentRuns?: number;
+};
 
 
 export type ListDueRetriesInput = {

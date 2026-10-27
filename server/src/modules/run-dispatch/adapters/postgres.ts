@@ -26,7 +26,7 @@ import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokab
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
-import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
+import { isHeartbeatWakeOnDemandEnabled, normalizeMaxConcurrentRuns } from "../../../services/heartbeat-policy.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
 import { connectionContinuationPendingResponse } from "../../../services/satisfied-connection-intents.js";
 import { collectDispositionRepairSourceState } from "../../../services/recovery/disposition-repair.js";
@@ -532,11 +532,31 @@ export function createPostgresRunDispatchAdapter(
       (${sourceRun.resultJson}->>'errorFamily' = 'provider_quota' OR
        (nullif(${sourceRun.resultJson}->>'errorFamily', '') IS NULL AND ${sourceRun.errorCode} = 'provider_quota'))
     ))`;
-    return db.select({ adapterType: agents.adapterType, activeCount: sql<number>`count(*)::int` }).from(heartbeatRuns)
+    const rows: Array<{
+      adapterType: string;
+      runtimeConfig: unknown;
+      activeCount: number;
+      queuedCount: number;
+      agentRunningCount: number;
+    }> = await db.select({
+      adapterType: agents.adapterType,
+      runtimeConfig: agents.runtimeConfig,
+      activeCount: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'running')::int`,
+      queuedCount: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'queued')::int`,
+      agentRunningCount: sql<number>`(select count(*)::int from heartbeat_runs agent_running_run
+        where agent_running_run.agent_id = ${agents.id} and agent_running_run.status = 'running')`,
+    }).from(heartbeatRuns)
       .leftJoin(sourceRun, eq(sourceRun.id, heartbeatRuns.retryOfRunId))
       .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
       .where(and(inArray(heartbeatRuns.status, ["queued", "running"]), isQuotaRecovery))
-      .groupBy(agents.adapterType);
+      .groupBy(agents.id);
+    return rows.map((row) => ({
+      adapterType: row.adapterType,
+      activeCount: row.activeCount,
+      queuedCount: row.queuedCount,
+      agentRunningCount: row.agentRunningCount,
+      agentMaxConcurrentRuns: normalizeMaxConcurrentRuns(parseObject(parseObject(row.runtimeConfig).heartbeat).maxConcurrentRuns),
+    }));
   }
 
   async function deferQuotaRecoveryRetry(input: { runId: string; provider: string; limit: number; now: Date }) {

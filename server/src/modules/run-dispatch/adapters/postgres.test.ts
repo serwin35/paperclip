@@ -240,7 +240,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
   });
   it("counts only actual quota retries in queued and running states between promotion batches", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
-    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 2 } } }).where(eq(agents.id, agentId));
     const sourceId = await seedRun({ companyId, agentId, status: "running" });
     await db.update(heartbeatRuns).set({ status: "failed", errorCode: "provider_quota", resultJson: { errorFamily: "provider_quota" } }).where(eq(heartbeatRuns.id, sourceId));
     const queuedId = await seedRun({ companyId, agentId, status: "queued", contextSnapshot: { retryOfRunId: sourceId }, scheduledRetryReason: "transient_failure" });
@@ -250,8 +250,10 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     const inheritedId = await seedRun({ companyId, agentId, status: "queued", contextSnapshot: { retryOfRunId: sourceId, errorFamily: "provider_quota", providerQuotaRetryNotBefore: new Date().toISOString() }, scheduledRetryReason: "workspace_busy" });
     await db.update(heartbeatRuns).set({ retryOfRunId: sourceId }).where(eq(heartbeatRuns.id, inheritedId));
 
+    await seedRun({ companyId, agentId, status: "running" });
+
     await expect(createPostgresRunDispatchAdapter(db).listActiveQuotaRetries!()).resolves.toEqual([
-      { adapterType: "claude_local", activeCount: 2 },
+      { adapterType: "claude_local", activeCount: 1, queuedCount: 1, agentRunningCount: 2, agentMaxConcurrentRuns: 2 },
     ]);
   });
 

@@ -1,5 +1,23 @@
 import { agents } from "@paperclipai/db";
-import { asBoolean, parseObject } from "../adapters/utils.js";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
+import { asBoolean, asNumber, parseObject } from "../adapters/utils.js";
+
+const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+
+const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
+
+const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
+
+export function normalizeMaxConcurrentRuns(value: unknown) {
+  const parsed = Math.floor(
+    asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT),
+  );
+  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
+  return Math.max(
+    HEARTBEAT_MAX_CONCURRENT_RUNS_MIN,
+    Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed),
+  );
+}
 
 export function isHeartbeatWakeOnDemandEnabled(
   agent: Pick<typeof agents.$inferSelect, "runtimeConfig">,

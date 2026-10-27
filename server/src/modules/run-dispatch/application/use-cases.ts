@@ -1,5 +1,5 @@
-import type { RunDispatchWriter, ScheduledRetryReader } from "./ports.js";
-import { pacedProviderForAdapterType } from "../../../services/quota-pacing.js";
+import type { ActiveQuotaRetry, RunDispatchWriter, ScheduledRetryReader } from "./ports.js";
+import { effectiveMaxConcurrentRuns, pacedProviderForAdapterType } from "../../../services/quota-pacing.js";
 import type { PostCommitEffect, PromoteScheduledRetryOutcome } from "./types.js";
 
 export function createEvaluateScheduledRetryGate(deps: { reader: ScheduledRetryReader }) {
@@ -26,6 +26,16 @@ export function createPromoteScheduledRetry(deps: { writer: RunDispatchWriter })
 
 const MAX_DUE_RETRIES_PER_SWEEP = 50;
 let promotionQueue: Promise<void> = Promise.resolve();
+
+// A queued retry counts only up to its agent's free run slots, with the same
+// paced limit the scheduler applies when it starts queued runs.
+function providerSlotsHeld(active: ActiveQuotaRetry) {
+  const running = active.activeCount ?? 1;
+  if (!active.queuedCount || active.agentMaxConcurrentRuns == null) return running;
+  const maxRuns = effectiveMaxConcurrentRuns(active.adapterType, active.agentMaxConcurrentRuns);
+  const freeRunSlots = Math.max(0, maxRuns - (active.agentRunningCount ?? running));
+  return running + Math.min(active.queuedCount, freeRunSlots);
+}
 
 function quotaRecoveryLimit() {
   const configured = Number.parseInt(process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER ?? "3", 10);
@@ -54,7 +64,7 @@ export function createPromoteDueScheduledRetries(deps: {
       if (limit > 0 && dueRuns.some((run) => run.quotaRecovery) && deps.reader.listActiveQuotaRetries) {
         for (const active of await deps.reader.listActiveQuotaRetries()) {
           const provider = pacedProviderForAdapterType(active.adapterType);
-          if (provider) activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + (active.activeCount ?? 1));
+          if (provider) activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + providerSlotsHeld(active));
         }
       }
 

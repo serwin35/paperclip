@@ -75,7 +75,6 @@ import {
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
 import {
   agents,
   caseHandoffs,
@@ -156,7 +155,7 @@ import {
   shouldCancelRunsForNonInvokableAgent,
   type AgentOrgRow,
 } from "../agent-invokability.js";
-import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { isHeartbeatWakeOnDemandEnabled, normalizeMaxConcurrentRuns } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 
@@ -216,12 +215,6 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   formatIssueIdentifierLink: (identifier: string | null, fallback: string) => string;
 }
 
-const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
-
-const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
-
-const HEARTBEAT_MAX_CONCURRENT_RUNS_MAX = 50;
-
 export const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
 
 export const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = [
@@ -246,17 +239,6 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   "issue_recovery_action_restored",
 ]);
-
-function normalizeMaxConcurrentRuns(value: unknown) {
-  const parsed = Math.floor(
-    asNumber(value, HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT),
-  );
-  if (!Number.isFinite(parsed)) return HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT;
-  return Math.max(
-    HEARTBEAT_MAX_CONCURRENT_RUNS_MIN,
-    Math.min(HEARTBEAT_MAX_CONCURRENT_RUNS_MAX, parsed),
-  );
-}
 
 export function shouldRequireIssueCommentForWake(
   contextSnapshot: Record<string, unknown> | null | undefined,

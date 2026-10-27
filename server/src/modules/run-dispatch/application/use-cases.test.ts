@@ -142,6 +142,48 @@ describe("createPromoteDueScheduledRetries", () => {
     }
   });
 
+  it("does not let retries queued behind their own agent's run limit hold provider slots", async () => {
+    const dueRuns = Array.from({ length: 5 }, (_, i) => ({ runId: `quota-starved-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    const reader = Object.assign(fakeReader(dueRuns), {
+      async listActiveQuotaRetries() {
+        return [{ adapterType: "claude_local", activeCount: 0, queuedCount: 3, agentRunningCount: 2, agentMaxConcurrentRuns: 2 }];
+      },
+    });
+    const deferred = vi.fn(async () => true);
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: deferred });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: deferred })({ cutoff: null });
+      expect(result.promoted).toBe(3);
+      expect(deferred).toHaveBeenCalledTimes(2);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
+  it("counts queued retries up to their agent's free run slots", async () => {
+    const dueRuns = Array.from({ length: 5 }, (_, i) => ({ runId: `quota-startable-${i}`, companyId: "company-1", quotaRecovery: true, adapterType: "claude_local" }));
+    const reader = Object.assign(fakeReader(dueRuns), {
+      async listActiveQuotaRetries() {
+        return [{ adapterType: "claude_local", activeCount: 1, queuedCount: 3, agentRunningCount: 2, agentMaxConcurrentRuns: 3 }];
+      },
+    });
+    const deferred = vi.fn(async () => true);
+    const writer = fakeWriter({ deferQuotaRecoveryRetry: deferred });
+    const prior = process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+    process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = "3";
+    try {
+      const result = await createPromoteDueScheduledRetries({ reader, promoteScheduledRetry: createPromoteScheduledRetry({ writer }), deferQuotaRecoveryRetry: deferred })({ cutoff: null });
+      expect(result.promoted).toBe(1);
+      expect(deferred).toHaveBeenCalledTimes(4);
+    } finally {
+      if (prior === undefined) delete process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER;
+      else process.env.PAPERCLIP_QUOTA_RECOVERY_MAX_CONCURRENT_PER_PROVIDER = prior;
+    }
+  });
+
   it("does not apply quota pacing to excluded retries or unpaced adapters", async () => {
     const dueRuns = [
       { runId: "ordinary-inherited-family", companyId: "company-1", quotaRecovery: false, adapterType: "claude_local" },

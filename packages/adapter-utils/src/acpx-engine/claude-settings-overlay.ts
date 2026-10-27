@@ -74,7 +74,8 @@ export function mergeClaudeSettingsOverlay(existing: Record<string, unknown>, ov
   };
   for (const entry of parsed.entries) {
     const marker = parsed.dedupeCommandMarker;
-    if (marker && current.some((item) => isRecord(item) && item.matcher === entry.matcher && Array.isArray(item.hooks) && item.hooks.some((hook) => isRecord(hook) && typeof hook.command === "string" && hook.command.includes(marker)))) {
+    const entryHasMarker = marker && entry.hooks.some((hook) => typeof hook.command === "string" && hook.command.includes(marker));
+    if (entryHasMarker && current.some((item) => isRecord(item) && item.matcher === entry.matcher && Array.isArray(item.hooks) && item.hooks.some((hook) => isRecord(hook) && typeof hook.command === "string" && hook.command.includes(marker)))) {
       skipped += 1;
       continue;
     }

@@ -430,6 +430,26 @@ describe("shared ACPX engine runtime behavior", () => {
       expect((applied.meta[0]?.commandNotes as string[]).some((note) => note === `Merged 1 hook entry from ${overlayFile} into hooks.PreToolUse (skipped 0 already present).`)).toBe(true);
       expect(applied.result.sessionParams?.configFingerprint).toBe(baseline.result.sessionParams?.configFingerprint);
 
+      const marker = "guard-marker";
+      const dedupeCwd = path.join(root, "dedupe-existing");
+      const dedupeSettingsFile = path.join(dedupeCwd, ".claude", "settings.local.json");
+      await fs.mkdir(path.dirname(dedupeSettingsFile), { recursive: true });
+      await fs.writeFile(dedupeSettingsFile, JSON.stringify({ hooks: { PreToolUse: [
+        { matcher: "Bash", hooks: [{ type: "command", command: `node ${marker} --strict` }] },
+      ] } }));
+      await fs.writeFile(overlayFile, JSON.stringify({ dedupeCommandMarker: marker, hooks: { PreToolUse: [
+        { matcher: "Bash", hooks: [{ type: "command", command: `node ${marker} --scope=agents` }] },
+        { matcher: "Bash", hooks: [{ type: "command", command: "echo audit" }] },
+      ] } }));
+      const deduped = await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd: dedupeCwd, stateDir: path.join(root, "state-dedupe") });
+      const dedupeSettings = JSON.parse(await fs.readFile(dedupeSettingsFile, "utf8"));
+      expect(dedupeSettings.hooks.PreToolUse).toEqual([
+        { matcher: "Bash", hooks: [{ type: "command", command: `node ${marker} --strict` }] },
+        { matcher: "Bash", hooks: [{ type: "command", command: "echo audit" }] },
+      ]);
+      expect((deduped.meta[0]?.commandNotes as string[]).some((note) => note.includes("skipped 1 already present"))).toBe(true);
+      expect((deduped.meta[0]?.commandNotes as string[]).some((note) => note.includes("echo audit"))).toBe(false);
+
       await fs.writeFile(overlayFile, "{");
       const invalid = await runExecutor({ agent: "claude", agentCommand: "node ./fake-acp.js", cwd, stateDir: path.join(root, "state-invalid") });
       expect(invalid.logs.some(({ stream, text }) => stream === "stderr" && text.includes("Ignoring Claude settings overlay"))).toBe(true);

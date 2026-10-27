@@ -2613,6 +2613,16 @@ export function issueThreadInteractionService(
       },
     ) => {
       const payload = connectionIntentPayloadSchema.parse(input.payload);
+      const sameSavedSetup = (candidate: typeof payload) =>
+        candidate.savedSetup?.endpointId === payload.savedSetup?.endpointId
+        && candidate.savedSetup?.connectionId === payload.savedSetup?.connectionId
+        && candidate.savedSetup?.action === payload.savedSetup?.action
+        && Boolean(candidate.savedSetup?.credentialRotation) === Boolean(payload.savedSetup?.credentialRotation)
+        && candidate.savedSetup?.credentialEntry?.requireAll === payload.savedSetup?.credentialEntry?.requireAll
+        // Preserve the original generation boundary on retries, while keeping
+        // requests for different credential fields distinct.
+        && isDeepStrictEqual(Object.keys(candidate.savedSetup?.credentialEntry?.previousGenerations ?? {}).sort(),
+          Object.keys(payload.savedSetup?.credentialEntry?.previousGenerations ?? {}).sort());
       const existing = await getIdempotentInteraction({
         issueId: issue.id,
         companyId: issue.companyId,
@@ -2624,7 +2634,7 @@ export function issueThreadInteractionService(
           || existing.sourceRunId !== input.sourceRunId
           || existing.addresseeUserId !== input.addresseeUserId
           || (existing.kind === "connection_intent"
-            ? (connectionIntentPayloadSchema.parse(existing.payload).serviceSlug !== payload.serviceSlug || connectionIntentPayloadSchema.parse(existing.payload).purpose !== payload.purpose || !isDeepStrictEqual(connectionIntentPayloadSchema.parse(existing.payload).accessRequest, payload.accessRequest))
+            ? (connectionIntentPayloadSchema.parse(existing.payload).serviceSlug !== payload.serviceSlug || connectionIntentPayloadSchema.parse(existing.payload).purpose !== payload.purpose || !sameSavedSetup(connectionIntentPayloadSchema.parse(existing.payload)) || !isDeepStrictEqual(connectionIntentPayloadSchema.parse(existing.payload).accessRequest, payload.accessRequest))
             : !isDeepStrictEqual(existing.payload, payload))
         ) {
           throw conflict(
@@ -2663,7 +2673,7 @@ export function issueThreadInteractionService(
           eq(issueThreadInteractions.addresseeUserId, input.addresseeUserId),
         ));
         const reusable = pending.find((candidate) =>
-          connectionIntentPayloadSchema.parse(candidate.payload).serviceSlug === payload.serviceSlug && connectionIntentPayloadSchema.parse(candidate.payload).purpose === payload.purpose && isDeepStrictEqual(connectionIntentPayloadSchema.parse(candidate.payload).accessRequest, payload.accessRequest));
+          connectionIntentPayloadSchema.parse(candidate.payload).serviceSlug === payload.serviceSlug && connectionIntentPayloadSchema.parse(candidate.payload).purpose === payload.purpose && sameSavedSetup(connectionIntentPayloadSchema.parse(candidate.payload)) && isDeepStrictEqual(connectionIntentPayloadSchema.parse(candidate.payload).accessRequest, payload.accessRequest));
         if (reusable) {
           await enqueueIssueInteractionChatPublications(tx as unknown as Db, hydrateInteraction(reusable));
           return reusable;
@@ -2689,8 +2699,11 @@ export function issueThreadInteractionService(
             sourceRunId: input.sourceRunId,
             originCommentIds,
             sourceIdentityContextId: input.sourceIdentityContextId ?? null,
-            title: payload.accessRequest ? `Grant ${payload.serviceName} access to ${payload.requestingAgentName}?` : `Connect ${payload.serviceName}`,
-            summary: `${payload.requestingAgentName} needs this connection to continue.`,
+            title: payload.accessRequest ? `Grant ${payload.serviceName} access to ${payload.requestingAgentName}?`
+              : payload.savedSetup?.action === "rotate_credentials" ? `Rotate ${payload.serviceName} webhook secret` : `Connect ${payload.serviceName}`,
+            summary: payload.savedSetup?.action === "rotate_credentials"
+              ? `${payload.requestingAgentName} needs you to rotate the signing secret and reconnect the saved App.`
+              : `${payload.requestingAgentName} needs this connection to continue.`,
             createdByAgentId: payload.requestingAgentId,
             addresseeUserId: input.addresseeUserId,
             payload,

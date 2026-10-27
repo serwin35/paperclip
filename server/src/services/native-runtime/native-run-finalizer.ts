@@ -3,8 +3,8 @@ import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { reconcileMuseNativeTerminalRun } from "./muse-terminal-reconciliation.js";
 import { assertNativeCaseHandoffResult } from "./native-case-handoff.js";
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
-import { hasPublishedGitHubReview } from "../chat-channels/github/review-wait.js";
-import { readNativeMonitorDelivery } from "./native-monitor-delivery.js";
+import { hasPublishedGitHubReview, readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
+import { readNativeMonitorDelivery, readNativePreservedMonitorWait } from "./native-monitor-delivery.js";
 import { isNativePlanWaitResult, readNativePlanWait } from "./native-plan-wait.js";
 import { hasPendingNativeChildCompletion } from "./native-child-completion-delivery.js";
 import { settleExternalConversation } from "../slack-conversation-lifecycle.js";
@@ -57,7 +57,7 @@ import {
 } from "./native-board-response-wait.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { isNewTerminalRunFailure, reportRunFailure } from "../run-failure-report.js";
-import { resolveExternalChatResponseWaitAuthorization } from "./chat-attachment-reuse.js";
+import { isPublishedGitHubReviewCompletionContinuation, readPublishedGitHubReviewCompletionContinuation, resolveExternalChatResponseWaitAuthorization } from "./chat-attachment-reuse.js";
 import {
   authorizeNativeChatReviewPresentation,
   hasMaterializedNativeReviewResponse,
@@ -1317,10 +1317,17 @@ export async function finalizeNativeRun(input: {
       .then((rows) => rows[0] ?? null);
     if (!authoritativeIssue)
       throw new Error("native_finalization_issue_missing");
+    const publishedReviewContinuation = assessment.reportedDisposition === "yielded" &&
+      isPublishedGitHubReviewCompletionContinuation(assessment.continuation)
+      ? await readPublishedGitHubReviewCompletionContinuation({ db: input.db,
+          binding: { companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id, agentId: run.agentId } })
+      : null;
     const externalChatResponseWaitAuthorization =
       assessment.reportedDisposition === "yielded" &&
       assessment.continuation?.kind === "response_wake"
-        ? await resolveExternalChatResponseWaitAuthorization({
+        ? isPublishedGitHubReviewCompletionContinuation(assessment.continuation)
+          ? publishedReviewContinuation?.idempotencyKey === assessment.continuation.idempotencyKey ? "authorized" : "revoked"
+          : await resolveExternalChatResponseWaitAuthorization({
             db: input.db,
             binding: {
               companyId: run.companyId,
@@ -1331,10 +1338,16 @@ export async function finalizeNativeRun(input: {
           })
         : "not_applicable";
     const monitorWaitAt = scheduledIssueMonitorWait(authoritativeIssue, run.agentId);
+    const preservedMonitorWait = terminalState === "succeeded" && input.workspaceFinalizeStatus === "succeeded" &&
+      assessment.reportedDisposition === "yielded" && assessment.continuation?.kind === "monitor"
+      ? await readNativePreservedMonitorWait(input.db, {
+        companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id, agentId: run.agentId,
+      }, authoritativeIssue) : null;
+    if (preservedMonitorWait && preservedMonitorWait.resultId !== resultRow.id) throw new NativeStatusRaceError();
     const supersededReviews = terminalState === "succeeded" && input.workspaceFinalizeStatus === "succeeded" &&
       assessment.attentionRequests.length === 0 && (assessment.reportedDisposition === "done" ||
         (assessment.reportedDisposition === "yielded" && (externalChatResponseWaitAuthorization === "authorized" ||
-          (assessment.continuation?.kind === "monitor" && monitorWaitAt !== null))))
+          (assessment.continuation?.kind === "monitor" && monitorWaitAt !== null && !preservedMonitorWait))))
       ? await findSupersededExternalReviewRequests(input.db, {
         companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id, agentId: run.agentId,
       }) : [];
@@ -1419,6 +1432,7 @@ export async function finalizeNativeRun(input: {
     const proposedDecision = resolveNativeFinalizerStatus({
       caseHandoffAuthorized: Boolean(await assertNativeCaseHandoffResult(input.db, run.id, authoritativeIssue.id, result)),
       monitorWaitDispatched: monitorDelivery !== null,
+      monitorWaitPreserved: preservedMonitorWait !== null,
       monitorWaitAuthorized: authoritativeIssue.workMode === "standard" && authoritativeIssue.executionRunId === run.id && monitorWaitAt !== null,
       planWaitAuthorized: planWait !== null,
       hasPendingChildCompletion,
@@ -1445,7 +1459,7 @@ export async function finalizeNativeRun(input: {
         (externalChatResponseWaitAuthorization === "authorized" || monitorWaitAt !== null)
         ? await hasPublishedGitHubReview(input.db, {
             companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id,
-          }) : false,
+          }) || (await readInheritedGitHubReviewWait(input.db, run))?.kind === "published" : false,
       boardResponseWaitAuthorized: boardResponseWait !== null,
       boardResponseWaitOrigin: boardResponseWaitOrigin !== null,
       isConversation: isConversation(authoritativeIssue),
@@ -1481,6 +1495,7 @@ export async function finalizeNativeRun(input: {
       workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       monitorDelivery,
       monitorWaitAt: assessment.continuation?.kind === "monitor" ? monitorWaitAt : null,
+      preservedMonitorWait,
     });
     await input.db
       .update(nativeRunFinalizations)
@@ -1522,6 +1537,8 @@ export async function finalizeNativeRun(input: {
           ? { agentId: run.agentId, nextCheckAt: monitorWaitAt } : undefined,
         requireMonitorDelivery: decision.reasonCode === "scheduled_monitor_dispatched"
           ? monitorDelivery ?? undefined : undefined,
+        requirePreservedMonitorWait: decision.reasonCode === "scheduled_monitor_preserved"
+          ? preservedMonitorWait ?? undefined : undefined,
         requirePlanWaitSource:
           decision.reasonCode === "native_plan_accepted_waiting_for_continuation"
             ? planWait?.source : undefined,
@@ -1544,7 +1561,7 @@ export async function finalizeNativeRun(input: {
             : undefined,
         requireExternalChatResponseWaitAuthorization:
           decision.reasonCode === "external_chat_response_waiting"
-            ? { agentId: run.agentId }
+            ? { agentId: run.agentId, ...(publishedReviewContinuation ? { completionContinuationKey: publishedReviewContinuation.idempotencyKey } : {}) }
             : undefined,
         reviewResponsePresentation:
           decision.reasonCode === "governed_response_waiting" &&
@@ -1608,33 +1625,42 @@ export async function finalizeNativeRun(input: {
         statusVersionAfter: Number(committed.issue.statusVersion),
         workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       };
+      const projectedStatus = terminalState === "succeeded" ? "succeeded" as const
+        : terminalState === "cancelled" ? "cancelled" as const : "failed" as const;
+      const projectedResult = sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
+        || ${JSON.stringify(finalizationMetadata)}::jsonb
+        || ${clearExecutionFailure ? recoveredExecutionFailureMetadata() : sql`'{}'::jsonb`}`;
+      const projectedError = providerFailure ? sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`
+        : clearExecutionFailure ? sql`null` : heartbeatRuns.error;
+      const projectedErrorCode = providerFailure ? sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`
+        : clearExecutionFailure ? sql`null` : heartbeatRuns.errorCode;
+      const projectionChanged = or(
+        sql`${heartbeatRuns.nativePhase} is distinct from ${finalizationPhase}`,
+        sql`${heartbeatRuns.resultJson} is distinct from ${projectedResult}`,
+        sql`${heartbeatRuns.error} is distinct from ${projectedError}`,
+        sql`${heartbeatRuns.errorCode} is distinct from ${projectedErrorCode}`,
+        ...(input.projectRunStatus ? [
+          sql`${heartbeatRuns.status} is distinct from ${projectedStatus}`,
+          isNull(heartbeatRuns.finishedAt),
+        ] : []),
+      );
       const projectRun = (tx: Db) => tx
         .update(heartbeatRuns)
         .set({
-          executionStatusDeliveryId: randomUUID(),
+          executionStatusDeliveryId: sql`case when ${projectionChanged}
+            then ${randomUUID()}::uuid else ${heartbeatRuns.executionStatusDeliveryId} end`,
           ...(input.projectRunStatus
             ? {
-                status:
-                  terminalState === "succeeded"
-                    ? "succeeded"
-                    : terminalState === "cancelled"
-                      ? "cancelled"
-                      : "failed",
-                finishedAt: now,
+                status: projectedStatus,
+                finishedAt: sql`case when ${heartbeatRuns.status} is distinct from ${projectedStatus}
+                  then ${now.toISOString()}::timestamptz else coalesce(${heartbeatRuns.finishedAt}, ${now.toISOString()}::timestamptz) end`,
               }
             : {}),
           nativePhase: finalizationPhase,
           nativePhaseUpdatedAt: now,
           ...(clearExecutionFailure ? { error: null, errorCode: null } : {}),
-          ...(providerFailure ? {
-            // Recovery can finalize before heartbeat saves the adapter result.
-            // Retain any independently recorded execution/cleanup failure.
-            error: sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`,
-            errorCode: sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`,
-          } : {}),
-          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
-            || ${JSON.stringify(finalizationMetadata)}::jsonb
-            || ${clearExecutionFailure ? recoveredExecutionFailureMetadata() : sql`'{}'::jsonb`}`,
+          ...(providerFailure ? { error: projectedError, errorCode: projectedErrorCode } : {}),
+          resultJson: projectedResult,
           updatedAt: now,
         })
         .where(eq(heartbeatRuns.id, run.id))

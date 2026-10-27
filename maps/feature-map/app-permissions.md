@@ -107,3 +107,6 @@ Scope: ui
 Storybook: Mount PermissionsPanel/AppDetail with quarantined actions, selection/review, refresh pending, empty and failed discovery states. Existing auto-allowed NewToolsAllowed examples are not quarantine review.
 Production: Exercise catalog refresh and new-tool review with permitted/denied actors; unreviewed actions stay quarantined, prior Off/Ask choices survive refresh, and approved review persists.
 Sources: Source: [PermissionsPanel.tsx](../../ui/src/pages/apps/app-detail/PermissionsPanel.tsx), [AppDetail.tsx](../../ui/src/pages/apps/AppDetail.tsx), [tool-access.ts](../../server/src/routes/tool-access.ts). Tests: [AppDetail.test.tsx](../../ui/src/pages/apps/AppDetail.test.tsx), [tool-access-service.test.ts](../../server/src/__tests__/tool-access-service.test.ts), [tool-access-policy-service.test.ts](../../server/src/__tests__/tool-access-policy-service.test.ts)
+### `delegated-configuration`
+
+See the canonical [delegated configuration guidance and acceptance evidence](connection-setup.md#delegated-configuration).

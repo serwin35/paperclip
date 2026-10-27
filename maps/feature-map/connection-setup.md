@@ -260,3 +260,18 @@ admission at those boundaries. Verify a served deployment and provider settings,
 not only the catalog action count. Vercel preview requires an existing deployment;
 its provider makes the first deployment production, so an empty-project preview
 must fail before submission and explain the explicit production prerequisite.
+### `delegated-configuration`
+
+A fresh standard agent can use the existing REST API and default native
+`search_api` / `call_api` to perform requested configuration within its responsible
+user's authority. Personal ownership stays with that user; audit attribution stays
+with the acting agent. Existing agents retain their explicit grants and restrictions.
+Human authentication and identity confirmation open the exact saved setup; local
+host administration and action approval retain their own boundaries. See the
+operation inventory in the companion and the [qualification record](../../doc/plans/2026-10-13-connection-api-parity.md).
+
+Automated: [agent-authenticated integration](../../server/src/__tests__/connection-management.integration.test.ts)
+uses normal creation defaults, persistent agent keys, run JWTs, native tool bindings,
+real database persistence, and deterministic provider fixtures. It separately checks
+user/agent revocation, trust, company/ownership scope, work modes and attribution.
+This is API reachability evidence, not a live provider setup or an LLM success rate.

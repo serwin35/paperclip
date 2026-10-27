@@ -45,7 +45,7 @@ const { WebSocket, WebSocketServer } = require("ws") as {
 };
 
 import { authorizationService, type AuthorizationActor } from "../services/authorization.js";
-import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
+import { getHeartbeatRunReadDecisions } from "../services/heartbeat-run-privacy.js";
 import { canActorReadCase } from "../services/case-access.js";
 
 interface ReadableIssue {
@@ -338,14 +338,22 @@ export function setupLiveEventsWebSocketServer(
       const payload = event.payload;
       const issueId = typeof payload.issueId === "string" ? payload.issueId
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
-      let readableIssue: ReadableIssue | null = null;
+      const runId = typeof payload.runId === "string" ? payload.runId
+        : payload.entityType === "heartbeat_run" && typeof payload.entityId === "string" ? payload.entityId : null;
+      const readBindings: Parameters<typeof getHeartbeatRunReadDecisions>[3][number][] = [];
       if (issueId) {
-        const [issue] = await db.select({ id: issues.id, identifier: issues.identifier, title: issues.title }).from(issues)
-          .where(and(eq(issues.id, issueId), eq(issues.companyId, event.companyId))).limit(1);
-        if (!issue || !(await access.decide({ actor: context!.actor, action: "issue:read",
-          resource: { type: "issue", companyId: event.companyId, issueId } })).allowed) return null;
-        readableIssue = issue;
+        readBindings.push({ companyId: event.companyId, scopeKind: "issue", issueId });
       }
+      if (runId) {
+        const [run] = await db.select({
+          companyId: heartbeatRuns.companyId,
+          scopeKind: heartbeatRuns.scopeKind,
+          issueId: heartbeatRuns.issueId,
+        }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId)));
+        if (!run) return null;
+        readBindings.push(run);
+      }
+      if ((await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).some(allowed => !allowed)) return null;
       if (["company_skill", "company_skill_source"].includes(String(payload.entityType)) && typeof payload.entityId === "string") {
         try {
           const skills = skillAccessService(db, context!.actor);
@@ -359,18 +367,16 @@ export function setupLiveEventsWebSocketServer(
         if (!project || !(await access.decide({ actor: context!.actor, action: "project:read",
           resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) return null;
       }
-      const runId = typeof payload.runId === "string" ? payload.runId
-        : payload.entityType === "heartbeat_run" && typeof payload.entityId === "string" ? payload.entityId : null;
-      if (runId) {
-        const [run] = await db.select({
-          companyId: heartbeatRuns.companyId,
-          scopeKind: heartbeatRuns.scopeKind,
-          issueId: heartbeatRuns.issueId,
-        }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId)));
-        if (!run || !(await canActorReadHeartbeatRun(db, access, context!.actor, run))) return null;
-      }
       if (event.type.startsWith("heartbeat.run.")) return runId ? event : null;
       if (event.type === "agent.session.goal.changed") return issueId ? event : null;
+      // Fork: the toast label of activity on a task, read only after the batched
+      // check above let this viewer read that task.
+      let readableIssue: ReadableIssue | null = null;
+      if (event.type === "activity.logged" && issueId && payload.entityType === "issue" && payload.entityId === issueId) {
+        const [issue] = await db.select({ id: issues.id, identifier: issues.identifier, title: issues.title }).from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, event.companyId))).limit(1);
+        readableIssue = issue ?? null;
+      }
       // Company-wide invalidations carry no task-derived content. Authorized
       // clients obtain details through viewer-filtered HTTP reads. Activity on a
       // task this viewer may read also keeps what its toast needs.
@@ -382,8 +388,7 @@ export function setupLiveEventsWebSocketServer(
         // The task read check above authorizes attribution, but not arbitrary details.
         ...(issueId ? await activityToastIdentity(db, event.companyId, payload) : {}),
         // Fork: the readable task's identifier, title and allowlisted change fields for the toast label.
-        ...(readableIssue && payload.entityType === "issue" && payload.entityId === readableIssue.id
-          ? issueActivityToastFields(payload, readableIssue) : {}),
+        ...(readableIssue ? issueActivityToastFields(payload, readableIssue) : {}),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "external_object.updated") return { ...event, payload: { externalObjectId: payload.externalObjectId } };

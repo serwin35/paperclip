@@ -912,11 +912,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     && Boolean(runnerAvailability && !runnerAvailability.disabled && !runnerAvailability.overriddenBuiltin)
     && Boolean(nativeRunnerAvailability && !nativeRunnerAvailability.disabled && !nativeRunnerAvailability.overriddenBuiltin);
   const upgradeWarnings = harnessType === "claude_local" ? normalizeClaudeRunnerOptions(effectiveConfig).warnings : [];
-  const upgradeTargetRef = useRef("");
-  const upgradeTarget = JSON.stringify([!isCreate ? props.agent.id : null, selectedCompanyId, adapterType,
+  const runnerSettingsTargetRef = useRef("");
+  const runnerSettingsTarget = JSON.stringify([!isCreate ? props.agent.id : null, selectedCompanyId, adapterType,
     rawCurrentDefaultEnvironmentId, upgradeEnvironmentId, upgradeEnvironment?.config, effectiveConfig, overlay]);
-  upgradeTargetRef.current = upgradeTarget;
-  useEffect(() => () => { upgradeTargetRef.current = ""; }, []);
+  runnerSettingsTargetRef.current = runnerSettingsTarget;
+  useEffect(() => () => { runnerSettingsTargetRef.current = ""; }, []);
   const showRunnerUpgrade = !isCreate
     && ["codex_local", "claude_local"].includes(props.agent.adapterType)
     && adapterType === props.agent.adapterType
@@ -931,7 +931,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       const nextOverlay = flushedEnv
         ? { ...overlay, adapterConfig: { ...overlay.adapterConfig, env: flushedEnv } }
         : overlay;
-      const pendingTarget = upgradeTargetRef.current;
+      const pendingTarget = runnerSettingsTargetRef.current;
       if (runnerAvailability?.defaultRunner !== "paperclip") {
         if (!canQualifyRunnerUpgrade || !upgradeEnvironmentId || !selectedCompanyId) {
           throw new Error("Could not determine which environment to verify. Retry the upgrade.");
@@ -940,7 +940,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           adapterType: harnessType,
           readAdapters: () => adaptersApi.list({ companyId: selectedCompanyId, environmentId: upgradeEnvironmentId }),
           probeEnvironment: () => agentsApi.qualifyRunner(agentId, upgradeEnvironmentId, selectedCompanyId),
-          isCurrent: () => upgradeTargetRef.current === pendingTarget,
+          isCurrent: () => runnerSettingsTargetRef.current === pendingTarget,
         });
         if (!qualified) throw new Error("Agent settings changed during verification. Retry the upgrade with the current settings.");
         queryClient.setQueryData(queryKeys.adapters.availability(selectedCompanyId, rawCurrentDefaultEnvironmentId || null), qualified.adapters);
@@ -1208,6 +1208,17 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       const aiConnection = isCreate ? undefined : aiRuntimeConnectionBindingSchema.safeParse(
         (overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? props.agent.runtimeConfig.aiConnection,
       ).data;
+      if (!isCreate && props.agent.adapterType === "paperclip_runner" && adapterType === "paperclip_runner"
+        && !isExternalRunner && aiConnection?.mode !== "router" && !isDirty && environmentId && canQualifyRunnerEnvironment(environmentList.find(environment => environment.id === environmentId))) {
+        const target = runnerSettingsTargetRef.current;
+        // Qualify only the saved computer. The strict agent-scoped endpoint
+        // accepts no draft provider config, credentials or replacement target.
+        const qualification = await agentsApi.qualifyRunner(props.agent.id, environmentId, selectedCompanyId);
+        if (runnerSettingsTargetRef.current !== target) throw new Error("Agent settings changed during the test. Run test again.");
+        if (qualification.ok !== true || qualification.details?.platformQualificationRecorded !== true) {
+          throw new Error(qualification.summary || "Could not verify the saved computer. Run test again.");
+        }
+      }
       if (props.compactTestFeedback) {
         const providerAdapter = adapterType === "paperclip_runner"
           ? adapterConfig.provider === "codex" ? "codex_local"
@@ -3877,7 +3888,7 @@ export function AdapterTypeDropdown({
     [...listAdapterOptions(type => adapterLabels[type] ?? getAdapterLabel(type)),
       ...(openAiDotEnabled ? [{ value: "openai_dot", label: "OpenAI Dot", experimental: true, comingSoon: false }] : []),
       ...(museEnabled ? [{ value: "muse", label: "Muse — Personal agent", experimental: true, comingSoon: false }] : []),
-    ].filter(item => (item.value !== "paperclip_runner" || nativeRunnerEnabled) && !disabledTypes.has(item.value))
+    ].filter(item => !item.comingSoon && (item.value !== "paperclip_runner" || nativeRunnerEnabled) && !disabledTypes.has(item.value))
       .sort((a, b) => Number(a.value === "paperclip_runner") - Number(b.value === "paperclip_runner")),
     [disabledTypes, openAiDotEnabled, nativeRunnerEnabled, museEnabled]);
   return <SelectPopover aria-label="Harness" value={value} onValueChange={onChange}
@@ -3886,10 +3897,9 @@ export function AdapterTypeDropdown({
       <span className="truncate">{adapterLabels[value] ?? getAdapterLabel(value)}</span>
       {selectedDisplay.experimental && <ExperimentalBadge />}
     </span>}
-    options={adapterList.map(item => ({ value: item.value, disabled: item.comingSoon,
+    options={adapterList.map(item => ({ value: item.value,
       group: item.value === "paperclip_runner" ? "Advanced" : undefined,
       label: <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="inline-flex shrink-0"><AdapterMark type={item.value} className="size-4" /></span><span>{item.label}</span>{item.experimental && <ExperimentalBadge />}</span>,
-      suffix: item.comingSoon ? <span className="text-(length:--text-nano) text-muted-foreground">Coming soon</span> : undefined,
     }))} />;
 }
 

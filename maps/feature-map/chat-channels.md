@@ -29,7 +29,11 @@ Message the configured bot/address from its external provider and follow the cor
 
 ### `endpoint-management`
 
+Delegated setup can save ordinary bot tokens and API keys. Provider verification keys require the addressed human credential-entry step or verified provider provisioning. Generic setup returns the saved handoff without changing those keys, and generic connection updates cannot replace channel credential references. A replacement card waits for an actual protected-value change and restored verification; old health, unchanged entry and unrelated bot-token repair do not complete it. Fresh GitHub handoffs open the import form; configured endpoints retain reconnect. Credential-entry field sets and completion modes stay distinct while matching retries reuse their saved baseline. Complete human replacements can repair disabled, deleted or unreadable old vault values. Saved links name the requested fields and completion mode; configured GitHub forms support targeted replacements while keeping other saved credentials. Provisioned Slack challenge proof survives runtime storage only for the same signing key and callback URL. The actual-auth Slack/GitHub fixtures cover these boundaries, retries, revocation and permitted bot-token repair; live provider repair remains separately qualified.
+
 Open `/apps/chat/:endpointId/settings` and the endpoint’s other available tabs; identity confirmation uses `/chat-identity/confirm`.
+
+For delegated Slack test messages and identity invitations, apply a Block or Ask first rule to the calling agent while allowing the endpoint's assigned agent. Verify no message is sent. Exercise caller, target and shared rate limits: one shared quota admits one send and the next distinct request is denied. For a saved GitHub identity handoff on an otherwise healthy endpoint, verify the card stays pending before identity confirmation and after an OAuth callback alone. Confirm the addressed user's identity through their human session, then verify continuation becomes available. Revoked, expired, wrong-user and wrong-installation links must keep the handoff blocked. These cases pass through the assembled API with real key/JWT/session middleware and deterministic providers; live Slack/GitHub consent remains separate evidence.
 
 ### `outbound-agentmail`
 
@@ -256,3 +260,9 @@ verified controller and environment cleanup; an unknown executor remains held.
 After successful admission, reload and verify that the prior skipped receipt does
 not strand a later real provider reply or tree resume. Provider fixtures support
 this behavior; live fixed-source runtime and destination proof remain separate.
+
+### `delegated-configuration`
+
+Endpoint activity hides private-task events while retaining a next-page cursor across private-only windows, so older readable history stays reachable. Actual-JWT fixtures verify this separately from live provider delivery.
+
+See the canonical [delegated configuration guidance and acceptance evidence](connection-setup.md#delegated-configuration).

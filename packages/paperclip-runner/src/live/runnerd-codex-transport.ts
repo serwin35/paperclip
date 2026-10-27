@@ -7018,7 +7018,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             ? "provider_frame_too_large"
             : /runner_ingress_bind_conflict/i.test(detail)
               ? "runner_ingress_bind_conflict"
-              : /transport_reconnect_grace_exceeded/i.test(detail)
+              : /transport[_ ]reconnect[_ ]grace[_ ]exceeded/i.test(detail)
                 ? "transport_reconnect_grace_exceeded"
                 : this.#startupComplete
                   ? "native_runner_process_exited"

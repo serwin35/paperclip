@@ -11399,6 +11399,7 @@ export function createRemoteRunnerProcessLauncher(input: {
   const runner = input.runner;
   return (spec) => {
     let exitConfirmed = false;
+    let pendingSignal: NodeJS.Signals | null = null;
     let launchedIdentity: {
       nonce: string;
       pid: number;
@@ -11409,12 +11410,20 @@ export function createRemoteRunnerProcessLauncher(input: {
       exitCode: null,
       signalCode: null,
       kill: (requestedSignal) => {
+        const requested = requestedSignal === "SIGKILL" || requestedSignal === 9
+          ? "SIGKILL"
+          : requestedSignal === "SIGINT" || requestedSignal === 2
+            ? "SIGINT"
+            : "SIGTERM";
+        // Keep Stop through staging and launch RPC completion. Acceptance is
+        // not exit evidence, and a later TERM must not undo an earlier KILL.
+        pendingSignal = pendingSignal === "SIGKILL" ? pendingSignal : requested;
         const identity = launchedIdentity;
-        if (!identity) return false;
+        if (!identity) return true;
         const signal =
-          requestedSignal === "SIGKILL" || requestedSignal === 9
+          pendingSignal === "SIGKILL"
             ? "KILL"
-            : requestedSignal === "SIGINT" || requestedSignal === 2
+            : pendingSignal === "SIGINT"
               ? "INT"
               : "TERM";
         // The durable marker, nonce, exact pid, and runner-id command line are
@@ -11447,6 +11456,16 @@ export function createRemoteRunnerProcessLauncher(input: {
         return true;
       },
     };
+    const cancelledBeforeDispatch = () => {
+      exitConfirmed = true;
+      child.signalCode = pendingSignal;
+      return {
+        code: null,
+        signal: pendingSignal,
+        stdout: "",
+        stderr: "runner_process_launch_cancelled",
+      };
+    };
     const completion = (async () => {
       if (input.ensureArtifact) {
         if (input.trace) {
@@ -11459,13 +11478,13 @@ export function createRemoteRunnerProcessLauncher(input: {
           await input.ensureArtifact();
         }
       }
+      if (pendingSignal) return cancelledBeforeDispatch();
       const launchStartedAtMs = Date.now();
       // The provider's onSpawn callback is optional and some sandbox command
       // runners cannot report a remote pid until after the command has begun
       // streaming. Signal as soon as staging is complete and the launch RPC is
       // dispatched; this is late enough to avoid preview retries during staging
       // and early enough to avoid a callback-dependent deadlock.
-      input.onRunnerProcessSpawned?.();
       await input.trace?.record({
         name: "runner.process.dispatch",
         parentName: "runner.session.startup",
@@ -11473,6 +11492,10 @@ export function createRemoteRunnerProcessLauncher(input: {
         endedAtMs: Date.now(),
         attributes: { target: "remote" },
       });
+      // Trace publication can yield after staging; recheck at dispatch.
+      if (pendingSignal) return cancelledBeforeDispatch();
+      input.onRunnerProcessSpawned?.();
+      if (pendingSignal) return cancelledBeforeDispatch();
       const identityNonce = randomUUID();
       const remoteArgs = [...spec.args];
       const diagnosticsArgumentIndex = remoteArgs.indexOf(
@@ -11549,6 +11572,7 @@ export function createRemoteRunnerProcessLauncher(input: {
       }
       launchedIdentity = { nonce: identityNonce, ...identity };
       child.pid = identity.pid;
+      if (pendingSignal) child.kill(pendingSignal);
       await input.onSpawn?.({
         pid: identity.pid,
         processGroupId: null,

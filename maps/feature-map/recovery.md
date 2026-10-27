@@ -78,10 +78,13 @@ fresh workspaces, bounded retries, historical adoption and service incidents.
 ### `run-detail`
 
 Open the agent's run (`/agents/:agentId/runs/:runId`) from activity or the task's
-run link. The run page hosts workspace recovery controls only for a failed run
+run link. The run page hosts workspace repair controls only for a failed run
 with error code `workspace_validation_failed` and a linked source task that still
 has a live `workspace_validation` recovery action. Use the source task for other
-stopped-run recovery checks.
+stopped-run recovery checks. Native workspace export failures also offer the
+read-only **Inspect recovery** control described in the
+[run diagnostic recipe](activity.md#activity-audit-1). It observes one selected
+source's recorded identity and does not retry, repair, or authorize execution.
 
 ### `operator-retry`
 

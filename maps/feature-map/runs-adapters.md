@@ -14,6 +14,7 @@ Agent access: [companion](../agent-access-map/runs-adapters.md).
 
 ## Sub-features
 
+- `model-accounts`: `runs-adapters/model-accounts` — configure AI accounts, login attempts, defaults, bindings, usage and pools through delegated connection APIs.
 - `availability`: `runs-adapters/availability` — discover installed adapters and available models/accounts.
 - `validation`: `runs-adapters/validation` — test an adapter in the selected execution environment and surface authentication failures.
 - `runs`: `runs-adapters/runs` — inspect run status, events, output, costs, and the source task.
@@ -245,3 +246,7 @@ The existing transport and ingress suites exercise these conditions without a
 provider. Repeat the actual managed setup and useful task journey separately;
 the literal `651a3de64fc943216cc414b64b1443809f9499da` Test attempt failed
 cleanup before hire and retains its unconfirmed recovery state.
+
+### `delegated-configuration`
+
+See the canonical [delegated configuration guidance and acceptance evidence](connection-setup.md#delegated-configuration).

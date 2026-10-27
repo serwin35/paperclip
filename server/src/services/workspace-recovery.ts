@@ -21,7 +21,7 @@ import { classifyNativeWorkspaceFailure } from "./native-runtime/native-workspac
 
 import { adoptSystemRecovery, loadSystemRecovery, updateSystemRecovery } from "./system-recovery.js";
 import { createSystemRecovery, failSystemRecovery, readSystemRecovery, reserveSystemRecoveryAttempt, SystemRecoveryFailure, type SystemRecoveryState } from "./system-recovery-state.js";
-import { inspectWorkspaceRecoverySource, workspaceRecoverySourceEligible } from "./workspace-recovery-source.js";
+import { inspectWorkspaceRecoverySource, workspaceRecoverySourceEligible, workspaceSourceBindingFailure } from "./workspace-recovery-source.js";
 import { preserveWorkspaceSnapshot } from "./workspace-recovery-snapshot.js";
 import { adoptHistoricalWorkspaceRecoveries } from "./workspace-recovery-backfill.js";
 
@@ -132,7 +132,7 @@ export async function recoverRetainedWorkspace(input: Source & { db: Db; environ
             // Missing local merge metadata permits a separate snapshot of the
             // exact bound allocation. Corrupt metadata never weakens binding.
             if ((error as NodeJS.ErrnoException)?.code === "ENOENT") reference = null;
-            else throw new SystemRecoveryFailure("source_binding_invalid", "service_required");
+            else throw workspaceSourceBindingFailure("local_descriptor_invalid");
           }
         }
         let stoppedLease = lease;
@@ -168,7 +168,7 @@ export async function recoverRetainedWorkspace(input: Source & { db: Db; environ
           environment, leaseId: lease.id, leaseMetadata: stoppedLease.metadata,
           lease: stoppedLease as EnvironmentLease, environmentRuntime: input.environmentRuntime });
         if (target?.kind !== "remote" || target.transport !== "sandbox" || !target.runner || target.remoteCwd !== remoteCwd)
-          throw new SystemRecoveryFailure("source_binding_invalid", "service_required");
+          throw workspaceSourceBindingFailure("execution_target_invalid");
         await ownership.assertHeld();
         const cleanupLease = await db.transaction(async tx => {
           const [fresh] = await tx.select().from(environmentLeases).where(and(eq(environmentLeases.companyId, input.companyId),
@@ -176,7 +176,7 @@ export async function recoverRetainedWorkspace(input: Source & { db: Db; environ
           if (!fresh || !hasRemoteTerminationReceipt(fresh) || fresh.providerLeaseId !== lease.providerLeaseId)
             throw new SystemRecoveryFailure("agent_stop_unconfirmed", "recheck_evidence");
           const pending = await prepareStoppedSandboxForRecovery(tx as unknown as Db, fresh);
-          if (!pending) throw new SystemRecoveryFailure("source_binding_invalid", "service_required");
+          if (!pending) throw workspaceSourceBindingFailure("recovery_stop_intent_invalid");
           const [claimed] = await tx.update(environmentLeases).set({ metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
             pendingCleanupAttemptId: ownership.token, pendingCleanupInFlight: true, pendingCleanupLeaseExpiresAtMs: Date.now() + 15 * 60_000,
           })}::jsonb` }).where(eq(environmentLeases.id, fresh.id)).returning();
@@ -192,8 +192,8 @@ export async function recoverRetainedWorkspace(input: Source & { db: Db; environ
         try {
           const opened = await input.environmentRuntime.resumeWorkspaceRecoveryLease({ source: input,
             leaseId: cleanupLease.id, environmentId: environment.id, ownership });
-          if (opened?.providerLeaseId !== lease.providerLeaseId || opened.metadata?.remoteCwd !== remoteCwd)
-            throw new SystemRecoveryFailure("source_binding_invalid", "service_required");
+          if (opened?.providerLeaseId !== lease.providerLeaseId) throw workspaceSourceBindingFailure("reopened_allocation_mismatch");
+          if (opened.metadata?.remoteCwd !== remoteCwd) throw workspaceSourceBindingFailure("reopened_cwd_mismatch");
           await inspectWorkspaceRecoverySource(db, input);
           await progress({ phase: "preserve_files" });
           let operationId: string;

@@ -928,6 +928,7 @@ export type {
   ProjectBudgetSummary,
   ProjectRepository,
   ProjectRepositoryOptions,
+  ProjectGitAuthorization,
   ProjectCodebase,
   ProjectCodebaseOrigin,
   ProjectGoalRef,
@@ -1131,6 +1132,7 @@ export type {
   IssueExecutionStagePrincipal,
   IssueExecutionDecision,
   IssueComment,
+  IssueRecentComments,
   IssueQueuedCommentEntry,
   IssueQueuedCommentProtocol,
   IssueQueuedCommentQueue,
@@ -2817,7 +2819,7 @@ export { restoreAgentInstructionSchema } from "./validators/agent.js";
 export type { AgentInstructionCandidate } from "./types/agent.js";
 export { resolveAgentInstructionCandidateSchema, type ResolveAgentInstructionCandidate } from "./validators/agent.js";
 
-export { isHeartbeatRunVisibleInMine } from "./heartbeat-inbox.js";
+export { isHeartbeatRunVisibleInMine, latestFailedRunsByAgent } from "./heartbeat-inbox.js";
 export * from "./browser-use.js";
 
 export * from "./types/skill-source.js";

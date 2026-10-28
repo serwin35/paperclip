@@ -3010,6 +3010,30 @@ export function recoveryService(
       );
   }
 
+  // Fork (2026-10-28): issues the source already blocks, directly or through other blockers. Such a
+  // child waits for the source, so making the source wait for it is a blocking cycle: issuesSvc.update
+  // refuses it with 422, and that one refusal took the whole startup recovery (and the server) down.
+  // Same reachability rule as issues.ts assertNoBlockingCycles.
+  async function issueIdsBlockedBy(companyId: string, issueId: string) {
+    const rows = await db
+      .select({ blockerIssueId: issueRelations.issueId, blockedIssueId: issueRelations.relatedIssueId })
+      .from(issueRelations)
+      .where(and(eq(issueRelations.companyId, companyId), eq(issueRelations.type, "blocks")));
+    const adjacency = new Map<string, string[]>();
+    for (const row of rows) {
+      adjacency.set(row.blockerIssueId, [...(adjacency.get(row.blockerIssueId) ?? []), row.blockedIssueId]);
+    }
+    const reached = new Set<string>();
+    const queue = [...(adjacency.get(issueId) ?? [])];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current === issueId || reached.has(current)) continue;
+      reached.add(current);
+      queue.push(...(adjacency.get(current) ?? []));
+    }
+    return reached;
+  }
+
   async function healthyOpenChildIssues(
     issue: Pick<RecoveryIssue, "id" | "companyId" | "projectWorkspaceId">,
     sameWorkspaceOnly = false,
@@ -3600,12 +3624,16 @@ export function recoveryService(
         continue;
       }
 
-      const [sourceState, healthyChildren, hasNewSourcePath] =
+      const [sourceState, openHealthyChildren, hasNewSourcePath] =
         await Promise.all([
           collectDispositionRepairSourceState(db, { issue }),
           healthyOpenChildIssues(issue),
           sourceHasNewPathOutsideRecoveryAction(action),
         ]);
+      // A child that waits for this source is not a healthy path of the source (fork, see issueIdsBlockedBy).
+      const blockedBySource =
+        openHealthyChildren.length > 0 ? await issueIdsBlockedBy(issue.companyId, issue.id) : new Set<string>();
+      const healthyChildren = openHealthyChildren.filter((child) => !blockedBySource.has(child.id));
       const durablePathRestored =
         action.ownerType !== "board" && sourceState.hasDurableWaitingPath;
       if (

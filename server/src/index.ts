@@ -1831,8 +1831,9 @@ async function startServerWithDatabaseTeardown(
           logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
         }
       })().catch((err) => {
-        logger.error({ err }, "startup heartbeat recovery failed");
-        throw err;
+        // Fork: one bad recovery step must not take the listener down. Rethrowing made launchd restart
+        // the server in a loop (2026-10-20, 2026-10-28); the periodic heartbeat scheduler retries these.
+        logger.error({ err }, "startup heartbeat recovery failed; serving without it until the next scheduler pass");
       });
       trackHeartbeatSchedulerWork(startupHeartbeatRecovery);
       await startupHeartbeatRecovery;

@@ -1916,6 +1916,54 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(recoveryIssues[0]?.status).toBe("blocked");
   });
 
+  it("does not make a source wait for a child that waits for the source (fork, 2026-10-28)", async () => {
+    // Production case: a board-escalated process_lost action on a source that blocks its own child.
+    // The child counted as a healthy path, so recovery tried to block the source by it, hit the
+    // blocking-cycle 422 and took the whole startup recovery down.
+    const { companyId, coderId, sourceIssueId, prefix } = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const childIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: childIssueId,
+      companyId,
+      title: "Follow-up that needs the source first",
+      status: "blocked",
+      priority: "medium",
+      assigneeAgentId: coderId,
+      parentId: sourceIssueId,
+      issueNumber: 2,
+      identifier: `${prefix}-2`,
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: sourceIssueId,
+      relatedIssueId: childIssueId,
+      type: "blocks",
+    });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "stranded_assigned_issue",
+      ownerType: "board",
+      cause: "process_lost",
+      fingerprint: `process-lost:${sourceIssueId}`,
+      evidence: {},
+      nextAction: "Decide how the stopped work continues.",
+      wakePolicy: { type: "board_escalation", reason: "process_lost", preservesSourceAssignee: true },
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });
+
+    await expect(recovery.reconcileStrandedAssignedIssues()).resolves.toBeDefined();
+
+    const relations = await db
+      .select({ issueId: issueRelations.issueId, relatedIssueId: issueRelations.relatedIssueId })
+      .from(issueRelations)
+      .where(eq(issueRelations.companyId, companyId));
+    expect(relations).toEqual([{ issueId: sourceIssueId, relatedIssueId: childIssueId }]);
+    const [actionAfter] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(actionAfter?.resolutionNote).not.toBe("durable_path_restored:healthy_child");
+  });
+
   it("exposes active recovery actions on the issue read API", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);

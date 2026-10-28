@@ -1311,6 +1311,16 @@ export function heartbeatService(
     return heartbeatQueue.dispatchPendingNativeStatusWakeups(...args);
   }
 
+  function resumeQueuedRunsAfterDrain() {
+    const promise = heartbeatQueue.resumeQueuedRunsAfterDrain();
+    activeWakeupPromises.add(promise);
+    void promise.then(
+      () => { activeWakeupPromises.delete(promise); },
+      () => { activeWakeupPromises.delete(promise); },
+    );
+    return promise;
+  }
+
   const runLifecycle = createHeartbeatLifecycle(db, {
     issuesSvc,
     recovery,
@@ -2380,7 +2390,7 @@ export function heartbeatService(
         !boundSourceWorkspace && !taskWorkspaceIntentRow?.intent && !issueContext?.projectWorkspaceId
           ? taskProjectContext : null
       );
-      const parsedProjectExecutionWorkspacePolicy = workspacePolicyContext?.hasWorkspace && !boundSourceWorkspace
+      const parsedProjectExecutionWorkspacePolicy = workspacePolicyContext?.hasWorkspace
         ? await effectiveProjectWorkspacePolicy(db, agent.companyId, workspacePolicyContext.executionWorkspacePolicy, workspacePolicyContext.hasGitSource)
         : parseProjectExecutionWorkspacePolicy(workspacePolicyContext?.executionWorkspacePolicy);
       const projectExecutionWorkspacePolicy =
@@ -4094,6 +4104,8 @@ export function heartbeatService(
     retryScheduledRetryNow,
 
     resumeQueuedRuns,
+
+    resumeQueuedRunsAfterDrain,
 
     resumeQueuedRunsForAgent: async (companyId: string, agentId: string) => {
       const agent = await getAgent(agentId);

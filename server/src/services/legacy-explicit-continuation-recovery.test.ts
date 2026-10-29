@@ -62,6 +62,19 @@ describe("legacy recovery after an explicit user continuation", () => {
       .toMatchObject([{ status }]);
   });
 
+  it("does not recreate a resolved recovery action for the same legacy run", async () => {
+    const f = await fixture();
+    await db.update(issueRecoveryActions).set({
+      fingerprint: `legacy-execution:${f.source.id}`,
+      evidence: { runId: f.source.id, automaticRecovery: { replay: "not_started" } },
+    }).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+
+    await terminalizeLegacyExecution({ db, run: f.source, status: "failed", fromStatuses: ["failed"] });
+
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId))).toEqual(before);
+  });
+
   it("does not retire source recovery using a receipt bound to an unrelated task", async () => {
     const f = await fixture(), otherId = randomUUID();
     await db.insert(issues).values({ id: otherId, companyId: f.companyId, title: "Unrelated task", status: "todo", assigneeAgentId: f.agentId });

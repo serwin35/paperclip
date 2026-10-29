@@ -1,8 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 import { agents, companies, createDb, heartbeatRuns, issueRecoveryActions, issues, type Db } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
+import { errorHandler } from "../middleware/index.js";
+import { issueRoutes } from "../routes/issues.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -73,6 +77,54 @@ describe.skipIf(!support.supported)("execution blocker PostgreSQL read projectio
     expect(await compare(f)).toMatchObject({ runId: f.run.id, agentId: f.agentId, canRetry: true, canContinue: false });
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.run.id)))[0]).toEqual(f.run);
     expect(await getExecutionBlocker(db, randomUUID(), f.issueId)).toBeNull();
+  });
+
+  it.each([3600, 48097])("ignores %i resolved legacy actions without restoring an execution blocker", async historicalActionCount => {
+    const f = await fixture();
+    await db.update(issueRecoveryActions).set({ status: "resolved", outcome: "blocked", resolvedAt: new Date(),
+      evidence: { runId: f.run.id, automaticRecovery: { replay: "not_started" } },
+    }).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    const historicalActions = Array.from({ length: historicalActionCount }, (_, index) => ({
+      companyId: f.companyId,
+      sourceIssueId: f.issueId,
+      kind: "active_run_watchdog" as const,
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: `historical-${index}`,
+      status: "resolved" as const,
+      outcome: "blocked" as const,
+      nextAction: "Historical recovery record.",
+      evidence: { runId: f.run.id, automaticRecovery: { replay: "not_started" } },
+      resolvedAt: new Date(),
+    }));
+    for (let index = 0; index < historicalActions.length; index += 1000) {
+      await db.insert(issueRecoveryActions).values(historicalActions.slice(index, index + 1000));
+    }
+
+    const startedAt = performance.now();
+    expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toBeNull();
+    expect(performance.now() - startedAt).toBeLessThan(500);
+
+    const instance = express();
+    instance.use(express.json());
+    instance.use((req, _res, next) => {
+      req.actor = { type: "board", userId: "board-user", source: "local_implicit", isInstanceAdmin: true };
+      next();
+    });
+    instance.use("/api", issueRoutes(db, {} as never));
+    instance.use(errorHandler);
+    const endpointStartedAt = performance.now();
+    const response = await request(instance).get(`/api/issues/${f.issueId}`);
+    const endpointDuration = performance.now() - endpointStartedAt;
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(endpointDuration).toBeLessThan(2000);
+
+    const serverTiming = response.headers["server-timing"] ?? "";
+    const timings = new Map<string, number>(serverTiming.split(", ").map((metric: string) => {
+      const [name, duration] = metric.split(";dur=");
+      return [name ?? "", Number(duration)] as const;
+    }));
+    expect(timings.get("issue_execution_blocker")).toBeLessThan(500);
+    expect(timings.get("paperclip_issue")).toBeLessThan(2000);
   });
 
   it("retains the claimed adapter and startup receipts for a cancelled pre-provider run", async () => {

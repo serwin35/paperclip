@@ -1,6 +1,6 @@
 import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
 import { preDispatchExecutionWaitRecoveryActionPredicate } from "./pre-dispatch-execution-wait.js";
-import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, or, sql } from "drizzle-orm";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { z } from "zod";
 import { agentWakeupRequests, chatConversations, chatEndpoints, environmentLeases, heartbeatRuns, issueComments, issues, issueRecoveryActions, nativeRunFinalizations, toolConnections, type Db } from "@paperclipai/db";
@@ -9,7 +9,7 @@ import { canRetryStoppedRun } from "./cancelled-native-startup.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
 import { EXECUTION_RECONCILIATION_CAUSES, type ExecutionBlocker } from "@paperclipai/shared";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA, nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
-import { unreconciledNativeExportPredicate } from "./native-runtime/native-workspace-reconstruction.js";
+import { NATIVE_WORKSPACE_EXPORT_RECOVERY_CAUSES, unreconciledNativeExportPredicate } from "./native-runtime/native-workspace-reconstruction.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { readNativeWorkspaceSyncReference } from "./native-runtime/native-workspace-sync.js";
 import { hasVerifiedWorkspaceRepair, workspaceRecoveryDisplay } from "./workspace-recovery-receipt.js";
@@ -94,15 +94,18 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 
 /** Resolved recovery bookkeeping can still carry an effective no-replay hold. */
 export function executionBlockerPredicate() {
-  return and(
-    not(conversationRecoveryActionPredicate()!),
-    not(preDispatchExecutionWaitRecoveryActionPredicate()),
-    or(unreconciledNativeExportPredicate(), and(
-      inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-      or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
-    )),
+  const reconciliationCandidate = and(
+    inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
+    or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
+      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
   );
+  const nativeExportCandidate = inArray(issueRecoveryActions.cause, NATIVE_WORKSPACE_EXPORT_RECOVERY_CAUSES);
+
+  return sql`case when ${reconciliationCandidate} then
+    (not ${conversationRecoveryActionPredicate()!}
+      and not ${preDispatchExecutionWaitRecoveryActionPredicate()})
+    when ${nativeExportCandidate} then ${unreconciledNativeExportPredicate()}
+    else false end`;
 }
 
 export function nativeExecutionRecoveryActionPredicate() {

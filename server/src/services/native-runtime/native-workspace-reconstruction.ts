@@ -11,13 +11,13 @@ import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 import { nativeSha256 } from "./canonical.js";
 import { reconciledInterveningExecutions } from "./native-reconstruction-intervening-executions.js";
 
-const causes = ["native_workspace_sync_out_unrecoverable", "native_workspace_sync_out_retry_exhausted"];
+export const NATIVE_WORKSPACE_EXPORT_RECOVERY_CAUSES = ["native_workspace_sync_out_unrecoverable", "native_workspace_sync_out_retry_exhausted"];
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const changed = () => conflict("The lost workspace recovery changed. Refresh the task before continuing.", { code: "workspace_reconstruction_stale" });
 
 export function unreconciledNativeExportPredicate() {
   return and(
-    inArray(issueRecoveryActions.cause, causes),
+    inArray(issueRecoveryActions.cause, NATIVE_WORKSPACE_EXPORT_RECOVERY_CAUSES),
     or(and(
       or(inArray(issueRecoveryActions.status, ["active", "escalated"]), and(
         eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.resolutionNote, "new_source_execution_path"),
@@ -49,7 +49,7 @@ export async function validateNativeWorkspaceReconstruction(db: Db, input: {
     || run.status !== "failed" || run.nativePhase !== "terminal_failure" || coordinator.issueId !== issue.id
     || coordinator.phase !== "terminal_failure" || coordinator.leaseOwner || coordinator.failureDetail?.successorRunId
     || object(run.runnerProfileJson).nativeWorkspaceFinalizationOwner
-    || action.kind !== "active_run_watchdog" || action.ownerType !== "board" || !causes.includes(action.cause)
+    || action.kind !== "active_run_watchdog" || action.ownerType !== "board" || !NATIVE_WORKSPACE_EXPORT_RECOVERY_CAUSES.includes(action.cause)
     || action.evidence.runId !== run.id || coordinator.failureCode !== action.cause
     || !["active", "escalated", "resolved"].includes(action.status)
     || (action.status === "resolved" && action.resolutionNote !== "new_source_execution_path" && !object(action.evidence.executionReconciliation).workspaceReconstruction)

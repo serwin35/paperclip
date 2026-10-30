@@ -58,7 +58,6 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import type { Db } from "@paperclipai/db";
 import type { ChatChannelService } from "../services/chat-channels.js";
 import { activityLog, agents as agentsTable, chatConversations, companies, heartbeatRuns, issues as issuesTable, projects as projectsTable } from "@paperclipai/db";

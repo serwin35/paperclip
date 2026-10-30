@@ -19,6 +19,16 @@ export function normalizeMaxConcurrentRuns(value: unknown) {
   );
 }
 
+/** Runner work needs a task; generic interval heartbeats have no task owner.
+ * Task-bound schedules, monitors and external-provider assignments use their
+ * existing wake paths and are unaffected by this interval policy.
+ */
+export function supportsUnscopedTimerHeartbeat(
+  agent: Pick<typeof agents.$inferSelect, "adapterType">,
+) {
+  return agent.adapterType !== "paperclip_runner";
+}
+
 export function isHeartbeatWakeOnDemandEnabled(
   agent: Pick<typeof agents.$inferSelect, "runtimeConfig">,
 ) {

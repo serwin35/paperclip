@@ -183,8 +183,13 @@ export async function recoverPendingRunUsageReceipts(db: Db, input: { companyId:
   // reach the journal before source replacement or ledger acknowledgement.
   // A failed save aborts the operation so recovery can retry.
   const recovered = new Set<string>();
+  const examined = new Set<string>();
   // A concurrent failed replay can rename a file after releasing its company
   // lock. Rescan disappearing paths rather than certify an incomplete scan.
+  // A vanished entry was either replayed (its evidence is in the journal) or
+  // rotated to a new `retry-` name, so a rescan only needs unseen retry files.
+  // Other runs' live checkpoints churn constantly under concurrency; treating
+  // every one of them as moved failed run starts with this error.
   for (let scan = 0; scan < 3; scan++) {
     let names: string[];
     try { names = await fs.readdir(directory); }
@@ -192,7 +197,9 @@ export async function recoverPendingRunUsageReceipts(db: Db, input: { companyId:
     let moved = false;
     for (const name of names.filter(name => name.endsWith(".json"))) {
       const file = path.join(directory, name);
-      if (recovered.has(file)) continue;
+      if (recovered.has(file) || examined.has(name)) continue;
+      if (scan > 0 && !name.startsWith("retry-")) continue;
+      examined.add(name);
       const indexed = options.index?.get(file);
       if (indexed !== undefined && (indexed?.companyId !== input.companyId || indexed?.runId !== input.runId)) continue;
       let raw: unknown;

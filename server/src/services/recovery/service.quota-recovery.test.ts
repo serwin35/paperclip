@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { activityLog, agentWakeupRequests, agents, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueRecoveryActions, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { quotaResetSpreadMs } from "../provider-quota-retry.js";
@@ -30,7 +30,9 @@ describe.skipIf(!postgresSupport.supported)("provider quota recovery monitor", (
     db = createDb(temporary.connectionString);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end(); await temporary?.cleanup(); });
-  afterEach(async () => { await db.delete(activityLog); await db.delete(issueRecoveryActions); await db.delete(issues); await db.delete(heartbeatRuns); await db.delete(agentWakeupRequests); await db.delete(agents); await db.delete(companies); });
+  // The fixtures reset on Oct 28 2026; pin the clock before that so the reset stays in the future.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-10-27T12:00:00.000Z") }); });
+  afterEach(async () => { vi.useRealTimers(); await db.delete(activityLog); await db.delete(issueRecoveryActions); await db.delete(issues); await db.delete(heartbeatRuns); await db.delete(agentWakeupRequests); await db.delete(agents); await db.delete(companies); });
 
   it("schedules a provider reset monitor with deterministic spread", async () => {
     const companyId = randomUUID();

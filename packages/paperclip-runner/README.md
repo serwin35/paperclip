@@ -485,6 +485,12 @@ stable free-text option IDs. Legacy callers remain supported. Calls that supply
 both forms must describe the same complete form; partial forms remain invalid.
 The native recovery bridge uses the same projection for answer delivery.
 
+OpenCode 1.18.34 native questions allow a written answer by default when `custom`
+is omitted. The driver preserves that default and explicit `custom:false`; the
+native flag takes precedence over the legacy `allowCustom` alias. Choice options
+remain intact. Questions without options remain text-only, without a separate
+custom-answer field. See the [pinned native question contract](https://github.com/anomalyco/opencode/blob/v1.18.34/packages/schema/src/v1/question.ts).
+
 The server validates canonical answer constraints before persistence. Regex
 matching runs in isolated workers with a one-second deadline and at most four
 active workers. A timeout or capacity error leaves the question pending. The
@@ -981,10 +987,11 @@ while daemon work might still be running. The socket and its parent must be priv
 canonical paths owned by the same account. Local stdio assignment requires Unix;
 other platforms retain the HTTP path.
 
-## Kimi Code candidate
+## Kimi Code
 
 Kimi Code uses the pinned `@moonshot-ai/kimi-code@2.3.3` distribution through
-ACPX. Candidate support is pending local and Daytona Product E2E qualification.
+ACPX through the qualified native profile. Ordinary selection and Runtime Test
+require no candidate grant.
 The installation targets are macOS ARM64 and Linux x64. Platform startup,
 authenticated driver checks, and product acceptance are separate evidence levels.
 
@@ -998,8 +1005,12 @@ The account needs Kimi Code entitlement. Runtime Test verifies installation and
 queries the authenticated Code model catalog for the exact selected model. It
 sends no model prompt; an actual task verifies inference and tool execution.
 
-The ordinary hiring path stays hidden while qualification is pending. Existing
-legacy Kimi agents retain their runtime and history. Managed Kimi connections,
+The qualified native profile uses ordinary setup, hiring, metadata Test and task
+startup on these two supported targets without operator admission flags. Protected
+candidate startup records remain reserved for future pending profiles; saved agent
+configuration and public requests cannot supply that authority.
+
+Existing legacy Kimi agents retain their runtime and history. Managed Kimi connections,
 ambient login borrowing, other regions/platforms, steering, native child work,
 and per-run token/dollar accounting are outside this release. Read-only Kimi work
 uses scoped Paperclip tools; native filesystem and shell tools are denied.

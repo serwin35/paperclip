@@ -33,6 +33,7 @@ import {
   NativeSessionCleanupQuarantinedError,
   NativeSessionProtocolIntegrityError,
   isNativeRestartInterruption,
+  nativeRestartContinuationInFlight,
   nativeRestartInterruptedTurnId,
 } from "./contracts/native-session-backend.js";
 import {
@@ -304,6 +305,12 @@ export interface ExecuteNativeSessionOptions {
   resumeInterruptedTurn?: boolean;
   /** Read bounded task history only after recovery requires a fresh conversation. */
   getFreshSessionHandoff?: () => Promise<string | null>;
+  /**
+   * Seals this run's first-turn input immediately before `turn.start` and
+   * returns user messages that arrived while the run was preparing. Repeated
+   * calls for the same run return the same messages.
+   */
+  getFirstTurnQueuedInput?: () => Promise<string | null>;
   /**
    * Steered messages the provider acknowledged but the model never read, read
    * when a restart continuation starts. The provider lost them with the
@@ -1104,6 +1111,7 @@ async function consumeTurn(
   initialGovernedWait?: PersistedNativeSession["governedWait"],
   /** Settles a compaction-only turn, which reports no semantic result. */
   compactionResult?: PrpStructuredRunResult,
+  supersededTerminal?: (event: PrpEvent, signal: AbortSignal) => Promise<boolean>,
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const appendAbort = new AbortController();
@@ -1497,6 +1505,7 @@ async function consumeTurn(
         }
       }
       if (isTurnTerminal(event)) {
+        if (await supersededTerminal?.(event, appendAbort.signal)) continue;
         if (providerFailure) throw providerFailure;
         if (compactionResult && event.eventType === "turn.completed") {
           return {
@@ -2327,7 +2336,7 @@ export async function executeNativeSession(
   } | null = null;
   let reconciledRecoveryCheckpoint: PersistedNativeSession | null = null;
   const checkpointedInterruption = persistedSession && nativeRestartInterruptedTurnId(persistedSession);
-  if (checkpointedInterruption && persistedSession) {
+  if (persistedSession && (checkpointedInterruption || nativeRestartContinuationInFlight(persistedSession))) {
     // The turn failed because its process vanished; the conversation is still
     // usable. Keep its terminal fingerprint so replay cannot execute it twice.
     persistedSession = { ...persistedSession, terminal: null };
@@ -2745,11 +2754,12 @@ export async function executeNativeSession(
       return true;
     };
     const supersededByRestartContinuation = async (event: PrpEvent, signal: AbortSignal) => {
-      if (!recovered || !checkpointedInterruption || event.eventType !== "turn.failed" ||
-          !isNativeRestartInterruption(event.payload.error) || !event.turnId ||
-          event.turnId === checkpointedInterruption) return false;
-      await startupDecision;
-      signal.throwIfAborted();
+      if (!recovered || event.eventType !== "turn.failed" ||
+          !isNativeRestartInterruption(event.payload.error) || !event.turnId) return false;
+      if (checkpointedInterruption) {
+        await startupDecision;
+        signal.throwIfAborted();
+      }
       if (!restartContinuationStarted) return false;
       await continuationSetup?.catch(() => undefined);
       signal.throwIfAborted();
@@ -2757,7 +2767,6 @@ export async function executeNativeSession(
     };
     const resumeInterruptedTurn = async (event: PrpEvent, signal: AbortSignal) => {
       if (await requestContinuationDisposition(event, signal)) return true;
-      if (await supersededByRestartContinuation(event, signal)) return true;
       if (restartContinuationStarted || !recovered || !options.resumeInterruptedTurn ||
           // A compaction-only run never continues task work after a restart.
           // Runnerd records a restart-lost turn only for these providers, after
@@ -2941,6 +2950,7 @@ export async function executeNativeSession(
               options.sessionCompaction
                 ? sessionCompactionResult(input, options.sessionCompaction.requestId)
                 : undefined,
+              supersededByRestartContinuation,
             )
           : Promise.resolve({
               event: recoveryTerminal,
@@ -3046,6 +3056,14 @@ export async function executeNativeSession(
           }
           if ("workspace" in modelEnvelope && modelEnvelope.workspace && recoveredSnapshot.workingDirectory) {
             modelEnvelope.workspace.cwd = recoveredSnapshot.workingDirectory;
+          }
+          if (!(dispositionOnlyRecovery && !effectFreeInitialAcpxTurn) && options.getFirstTurnQueuedInput) {
+            const queuedInput = await options.getFirstTurnQueuedInput();
+            if (queuedInput && "task" in modelEnvelope) {
+              modelEnvelope.task.prompt = `${modelEnvelope.task.prompt}\n\n${queuedInput}`;
+            } else if (queuedInput && "events" in modelEnvelope) {
+              modelEnvelope.events = `${modelEnvelope.events}\n\n${queuedInput}`;
+            }
           }
           await session.startTurn({
             message: { role: "user", text: JSON.stringify(modelEnvelope) },

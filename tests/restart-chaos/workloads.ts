@@ -16,6 +16,7 @@ export interface WorkloadDefinition {
   title(nonce: string): string;
   description(nonce: string, agents?: WorkloadAgents): string;
   followUp?(nonce: string): string;
+  stopBeforeFollowUp?: boolean;
   /** Files and commands the observer must collect for the T-oracle. */
   collect: { documents: string[]; files(nonce: string): string[]; commands: Array<{ name: string; argv: string[] | ((nonce: string) => string[]) }>;
     childDocuments?: string[] };
@@ -35,6 +36,7 @@ const partMarker = (nonce: string, part: number) => `PART${part}-${nonce}`;
 
 const briefMarker = (nonce: string) => `CHAOS-${nonce}`;
 const followUpMarker = (nonce: string) => `FOLLOWUP-${nonce}`;
+const continueMarker = (nonce: string) => `CONTINUE-${nonce}`;
 const notesFile = (nonce: string) => `NOTES-${nonce}.md`;
 const benchFile = (nonce: string) => `bench-result-${nonce}.txt`;
 const benchRecord = (nonce: string) => `.bench/run-${nonce}.txt`;
@@ -58,6 +60,20 @@ export function parseBenchRecord(text: string | null | undefined) {
   const started = Number(fields.started), finished = Number(fields.finished);
   return Number.isFinite(started) && Number.isFinite(finished) && fields.result
     ? { seconds: finished - started, result: fields.result } : null;
+}
+
+export function stallWakeChecks(artifacts: OracleArtifacts): OracleResult["checks"] {
+  const stalls = artifacts.childStalls ?? [];
+  if (!stalls.length) return [];
+  const wakes = artifacts.stallWakes ?? [];
+  const matching = (stall: { childIssueId: string; recoveryActionId: string | null }) => wakes.filter(wake =>
+    wake.stalledIssueId === stall.childIssueId && (stall.recoveryActionId === null || wake.recoveryActionId === stall.recoveryActionId));
+  const unwoken = stalls.filter(stall => matching(stall).length === 0).map(stall => `${stall.childIssueId}:${stall.recoveryActionId}`);
+  const perPair = new Map<string, number>();
+  for (const wake of wakes) perPair.set(`${wake.stalledIssueId}:${wake.recoveryActionId}`, (perPair.get(`${wake.stalledIssueId}:${wake.recoveryActionId}`) ?? 0) + 1);
+  const repeated = [...perPair.entries()].filter(([, count]) => count > 1).map(([key]) => key);
+  return [{ name: "parent_woken_once_per_stall", ok: !unwoken.length && !repeated.length,
+    detail: `stalls=${stalls.length} wakes=${wakes.length}${unwoken.length ? ` unwoken=${unwoken.join(",")}` : ""}${repeated.length ? ` repeated=${repeated.join(",")}` : ""}` }];
 }
 
 function result(checks: OracleResult["checks"]): OracleResult {
@@ -205,6 +221,7 @@ export const workloadDefinitions: Record<WorkloadId, WorkloadDefinition> = {
         { name: "part2_kept", ok: distinct && Boolean(agents) && part2[0]!.assigneeAgentId === agents!.self.id,
           detail: `assignee=${part2[0]?.assigneeAgentId ?? "none"}` },
         { name: "summary_has_both_parts", ok: summary.includes(partMarker(nonce, 1)) && summary.includes(partMarker(nonce, 2)) },
+        ...stallWakeChecks(artifacts),
       ]);
     },
   },
@@ -234,6 +251,29 @@ export const workloadDefinitions: Record<WorkloadId, WorkloadDefinition> = {
     collect: { documents: ["brief"], files: () => [], commands: [] },
     grade(nonce, artifacts) {
       return result([statusCheck(artifacts), ...briefChecks(artifacts.documents.brief, [briefMarker(nonce), followUpMarker(nonce)])]);
+    },
+  },
+  S1: {
+    id: "S1",
+    label: "Stop while running, then continue",
+    usesRepository: false,
+    fireWindowMs: [20_000, 60_000],
+    followUpWindowMs: [8_000, 25_000],
+    budgetMs: 12 * 60_000,
+    title: nonce => `Chaos S1 brief stopped and continued ${nonce}`,
+    description: briefDescription,
+    stopBeforeFollowUp: true,
+    followUp: nonce => `I stopped your previous run on purpose. Please continue the task now: finish the \`brief\` document and also include the line \`${continueMarker(nonce)}\` on its own line before you mark the task done.`,
+    collect: { documents: ["brief"], files: () => [], commands: [] },
+    grade(nonce, artifacts) {
+      const stop = artifacts.stop;
+      return result([
+        statusCheck(artifacts),
+        ...briefChecks(artifacts.documents.brief, [briefMarker(nonce), continueMarker(nonce)]),
+        { name: "stop_took_effect", ok: stop?.runStatus === "cancelled", detail: `run=${stop?.runId ?? "none"} status=${stop?.runStatus ?? "none"}` },
+        { name: "nothing_ran_after_stop", ok: Boolean(stop) && stop!.continuePosted && stop!.runsStartedBeforeContinue.length === 0,
+          detail: stop ? `continue=${stop.continuePosted} runs=${stop.runsStartedBeforeContinue.join(",") || "none"}` : "not stopped" },
+      ]);
     },
   },
   B1: {

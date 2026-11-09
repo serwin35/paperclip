@@ -764,6 +764,14 @@ describe("remote controller restart adoption", () => {
       await rm(stateBase, { recursive: true, force: true });
     }
   });
+  it("answers a local run's held Paperclip tool calls after a restart (restart chaos t101)", async () => {
+    state.createBackend.mockClear();
+    state.createTransport.mockClear();
+    await createRunnerdBackend({ db: leaseDb(execution), execution, runnerInstanceId: "runner" });
+    state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+    expect((state.createTransport.mock.calls.at(-1)![0] as { recoverSemanticToolInput?: unknown }).recoverSemanticToolInput)
+      .toEqual(expect.any(Function));
+  });
   it("rejects a replaced sandbox before reading or mutating it", async () => {
     const { execute, target } = fixture();
     target.sandboxLeaseAcquisition.providerLeaseId = "replacement";
@@ -13556,6 +13564,101 @@ describe("native session bounded recovery", () => {
     expect(state.upsertRecoveryAction).not.toHaveBeenCalled();
   });
 
+  // H1 (restart chaos): a budget pause's lifecycle Stop interrupted a Codex
+  // turn, which ended without a semantic result. That Stop must stay a
+  // cancellation (resume continues it), never an interrupted-run retry the
+  // pause then strands.
+  it.each(["Agent lifecycle stop requested", "Cancelled due to budget pause"])("does not turn an acknowledged governance pause Stop (%s) into a retry", async (reason) => {
+    const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
+    const stop: Record<string, unknown> = {};
+    state.execute.mockReset().mockImplementationOnce(async () => {
+      Object.assign(stop, {
+        cancellation: { reason, source: "control_plane", expected: true, initiator: { type: "system" },
+          recordedAt: new Date().toISOString() },
+        ...(reason === "Agent lifecycle stop requested" ? { pauseStop: { holds: ["company_paused"], companyPauseReason: "budget" } } : {}),
+        nativeCancellation: {
+          schema: "paperclip.native-cancellation.v1", ...execution.binding, scope: "run", reasonCode: "cancellation_run_only",
+          dispatched: true, dispatchState: "acknowledged", intentAuditId: "intent", acknowledgementAuditId: "ack",
+        } });
+      throw new Error("native_finalization_missing: session returned no semantic result");
+    });
+    state.upsertRecoveryAction.mockClear();
+    await expect(executePaperclipNativeSession({
+      db: leaseDb(execution, {}, stop, updates), execution, runnerInstanceId: "governance-stop",
+    })).rejects.toThrow("native_cancellation_pending_recovery");
+    expect(updates.some(update => update.table === heartbeatRuns && update.values.status === "failed")).toBe(false);
+    expect(updates.some(update => update.table === nativeRunFinalizations && update.values.failureCode === "native_retry_cancelled")).toBe(true);
+    expect(state.upsertRecoveryAction).not.toHaveBeenCalled();
+  });
+
+  it("waits for an in-flight governance pause Stop to save its acknowledgement before judging a missing result", async () => {
+    let releaseCleanup!: () => void, endTurn!: () => void, opened!: () => void;
+    const turnEnded = new Promise<void>(resolve => { endTurn = resolve; });
+    const sessionOpen = new Promise<void>(resolve => { opened = resolve; });
+    state.cancel.mockReset().mockReturnValue({ cleanup: new Promise<void>(resolve => { releaseCleanup = resolve; }) });
+    state.execute.mockReset().mockImplementationOnce(async (options) => {
+      await options.onSession({ cancel: state.cancel });
+      opened();
+      await turnEnded;
+      throw new Error("native_finalization_missing: session returned no semantic result");
+    });
+    state.upsertRecoveryAction.mockClear();
+    const runResultJson: Record<string, unknown> = {};
+    const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
+    const outcome = executePaperclipNativeSession({ db: leaseDb(execution, {}, runResultJson, updates), execution, runnerInstanceId: "pause-stop-in-flight" })
+      .catch(error => error);
+    // The pause's fence recorded its cancellation before dispatch.
+    const persistence = cancellationDb({ resultJson: {
+      cancellation: { reason: "Agent lifecycle stop requested", source: "control_plane", expected: true,
+        initiator: { type: "system" }, recordedAt: new Date().toISOString() },
+      pauseStop: { holds: ["company_paused"], companyPauseReason: "budget" } } });
+    const transaction = persistence.db.transaction.bind(persistence.db);
+    // The executor reads the same durable run row the Stop writes.
+    (persistence.db as unknown as { transaction: typeof transaction }).transaction = (async (operation: Parameters<typeof transaction>[0]) => {
+      const result = await transaction(operation);
+      Object.assign(runResultJson, persistence.getResultJson());
+      return result;
+    }) as typeof transaction;
+    await sessionOpen;
+    const stopping = cancelNativeSession(execution.binding.runId, "Agent lifecycle stop requested", { db: persistence.db, scope: "run" });
+    try {
+      await vi.waitFor(() => expect(state.cancel).toHaveBeenCalledOnce());
+      // The interrupted turn ends before the Stop saves its acknowledgement.
+      endTurn();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(updates.some(update => update.table === heartbeatRuns && update.values.status === "failed")).toBe(false);
+      releaseCleanup();
+      await stopping;
+      expect(await outcome).toMatchObject({ name: "NativeCancellationPendingRecoveryError" });
+      expect(updates.some(update => update.table === heartbeatRuns && update.values.status === "failed")).toBe(false);
+      expect(updates.some(update => update.table === nativeRunFinalizations && update.values.failureCode === "native_retry_cancelled")).toBe(true);
+      expect(state.upsertRecoveryAction).not.toHaveBeenCalled();
+    } finally { releaseCleanup(); endTurn(); await outcome; }
+  });
+
+  it("still retries a missing result after a system Stop that is not a governance pause", async () => {
+    const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
+    const stop: Record<string, unknown> = {};
+    state.execute.mockReset().mockImplementationOnce(async () => {
+      Object.assign(stop, {
+        cancellation: { reason: "Agent lifecycle stop requested", source: "control_plane", expected: true,
+          initiator: { type: "system" }, recordedAt: new Date().toISOString() },
+        nativeCancellation: {
+          schema: "paperclip.native-cancellation.v1", ...execution.binding, scope: "run", reasonCode: "cancellation_run_only",
+          dispatched: true, dispatchState: "acknowledged", intentAuditId: "intent", acknowledgementAuditId: "ack",
+        } });
+      throw new Error("native_finalization_missing: session returned no semantic result");
+    });
+    state.upsertRecoveryAction.mockReset().mockResolvedValue({});
+    const service = vi.spyOn(issueServiceModule, "issueService").mockReturnValue({ update: vi.fn(async () => null) } as unknown as ReturnType<typeof issueServiceModule.issueService>);
+    try {
+      await expect(executePaperclipNativeSession({
+        db: leaseDb(execution, {}, stop, updates), execution, runnerInstanceId: "termination-stop",
+      })).rejects.not.toThrow("native_cancellation_pending_recovery");
+      expect(updates.some(update => update.table === nativeRunFinalizations && update.values.failureCode === "native_retry_cancelled")).toBe(false);
+    } finally { service.mockRestore(); }
+  });
+
   it.each(["pending", "acknowledged"])("preserves a %s Stop when cancellation wins before the first turn", async (dispatchState) => {
     const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
     const stop: Record<string, unknown> = {};
@@ -15633,6 +15736,44 @@ describe("runnerd provider runtime wiring", () => {
         }) }));
       } finally { restore.mockRestore(); header.mockRestore(); verify.mockRestore(); await controller.stop(); }
     });
+
+  it.each([
+    { label: "a sandbox this run created", outcome: "created", providerLeaseId: "sandbox", remoteCwd: "/workspace", admitted: true },
+    { label: "a replacement sandbox", outcome: "replacement", providerLeaseId: "sandbox", remoteCwd: "/workspace", admitted: false },
+    { label: "another provider lease", outcome: "created", providerLeaseId: "other-sandbox", remoteCwd: "/workspace", admitted: false },
+    { label: "another remote directory", outcome: "created", providerLeaseId: "sandbox", remoteCwd: "/elsewhere", admitted: false },
+  ] as const)("binds a staged attachment restart to the claimed sandbox lease: $label", async ({ outcome, providerLeaseId, remoteCwd, admitted }) => {
+    const current = scopedNativeExecution(`staged-attachment-lease-${outcome}-${providerLeaseId}-${remoteCwd.length}`);
+    current.task.prompt = "Inspect attachment ref:original";
+    const root = await initializeScopedRunnerRoot(current, "attachment-runner");
+    const sourceIdentity = { runnerInstanceId: "attachment-runner", environmentLeaseId: "attachment-lease",
+      runId: "attachment-source", normalizedSessionId: current.session.normalizedSessionId!, turnId: "source-turn", itemId: "source-item" };
+    const targetIdentity = { ...sourceIdentity, runId: current.binding.runId, turnId: "target-turn", itemId: "target-item" };
+    const controller = new DurablePrpControlPlane({ stateDirectory: join(root, "control-plane"), identity: sourceIdentity,
+      expectedRunnerVersion: "fixture", expectedRunnerDigest: `sha256:${"a".repeat(64)}` });
+    controller.stageRunAttachment(targetIdentity, { provider: { kind: "codex", instructions: "prepared attachment grant" } });
+    const saved = JSON.parse(await readFile(join(root, "control-plane/control-plane-state.json"), "utf8"));
+    state.stageNativeRunnerWakeAttachments.mockImplementationOnce(async () =>
+      ({ attachments: [{ id: "attachment-original" }], cleanup: async () => undefined }) as never);
+    state.renderNativeRunnerStagedAttachmentPrompt.mockReturnValueOnce("Materialized attachment: .paperclip-inbound/current/original");
+    const reached = new Error("verified staged admission reached recheck");
+    const restore = vi.spyOn(runnerCheckpoint, "restoreNativeRunnerCheckpoint").mockResolvedValue(null);
+    const header = vi.spyOn(runnerCheckpoint, "loadNativeRunnerCheckpointHeader").mockResolvedValue("staged header");
+    const verify = vi.spyOn(stagedAttachmentRecovery, "resolveNativeStagedAttachmentRecovery")
+      .mockResolvedValueOnce({ currentExecution: structuredClone(current), sourceIdentity, targetIdentity,
+        templateDigest: saved.stagedRunAttachment.templateDigest } as never)
+      .mockRejectedValueOnce(reached);
+    try {
+      const resume = executePaperclipNativeSession({ db: leaseDb(current), execution: current, useRunnerd: true,
+        runnerInstanceId: "attachment-runner", restartRecovery: { kind: "reattach_remote_runner", runId: current.binding.runId,
+          leaseOwner: "controller", controllerGeneration: 2, providerAttempt: 1, restartKind: "hard", recoveryRequestId: null,
+          remote: { kind: "sandbox", leaseId: "attachment-lease", providerLeaseId: "sandbox", remoteCwd: "/workspace" } } as never,
+        runnerExecutionTarget: { kind: "remote", transport: "sandbox", leaseId: "attachment-lease", remoteCwd,
+          runner: { execute: vi.fn() }, sandboxLeaseAcquisition: { outcome, providerLeaseId } } as never });
+      if (admitted) { await expect(resume).rejects.toBe(reached); expect(verify).toHaveBeenCalledTimes(2); }
+      else { await expect(resume).rejects.toThrow("staged_attachment_recovery_unproven"); expect(verify).not.toHaveBeenCalled(); }
+    } finally { restore.mockRestore(); header.mockRestore(); verify.mockRestore(); await controller.stop(); }
+  });
 
   it("passes the run checkpoint active turn into restart recovery", async () => {
     state.createBackend.mockClear();
@@ -19603,6 +19744,8 @@ describe("runnerd provider runtime wiring", () => {
     ...["resumed", "replacement"].map(outcome => ({ outcome, scenario: "fresh", homeMode: "preconfigured" })),
     ...["interrupted_bootstrap", "interrupted_bootstrap_other_run", "interrupted_bootstrap_unproven", "interrupted_bootstrap_symlink_parent"]
       .map(scenario => ({ outcome: "resumed", scenario, homeMode: "isolated" })),
+    { outcome: "created", scenario: "interrupted_bootstrap", homeMode: "isolated" },
+    { outcome: "created", scenario: "interrupted_bootstrap_symlink_parent", homeMode: "isolated" },
   ])(
     "bootstraps only an untouched provider session in a $outcome workspace lease: $scenario ($homeMode)", async ({ outcome, scenario, homeMode }) => {
     const remoteCwd = join(isolatedStateDirectory, "remote");
@@ -20404,6 +20547,22 @@ it("saves a runner-marked model rejection from a provider terminal as a model ch
     "native_provider_model_rejected: openrouter/unavailable-model is not a valid model ID"))).toBe("native_provider_terminal_failed");
   expect(nativeSessionFailureSourceCode(new NativeProviderTerminalFailure("provider_turn_failed", false,
     "openrouter/unavailable-model is not a valid model ID"))).toBe("native_provider_terminal_failed");
+});
+it("records a runner process exit that closed the provider event stream as runner loss", () => {
+  // Shape the Codex/OpenCode drivers write when runnerd exits mid-turn.
+  const lost = new NativeProviderTerminalFailure("notification_transport_failed", false,
+    "Notification transport failed closed: native_runner_process_exited: runnerd exited unexpectedly with code 137");
+  const code = nativeSessionFailureSourceCode(lost);
+  expect(code).toBe("native_runner_process_exited");
+  expect(nativeSessionFailureDisposition(1, new Date(), code)).toMatchObject({ phase: "retryable_failure", failureCode: "native_session_interrupted" });
+  expect(nativeSessionFailureDisposition(3, new Date(), code)).toEqual({ phase: "terminal_failure", failureCode: "native_session_retry_exhausted", nextAttemptAt: null });
+  // Other closed-stream causes, and the runner code only inside provider text, stay provider failures.
+  expect(nativeSessionFailureSourceCode(new NativeProviderTerminalFailure("notification_transport_failed", false,
+    "Notification transport failed closed: provider stream ended"))).toBe("native_provider_terminal_failed");
+  expect(nativeSessionFailureSourceCode(new NativeProviderTerminalFailure("provider_turn_failed", false,
+    "Notification transport failed closed: native_runner_process_exited: runnerd exited unexpectedly"))).toBe("native_provider_terminal_failed");
+  expect(nativeSessionFailureSourceCode(new NativeProviderTerminalFailure("notification_transport_failed", false,
+    "Notification transport failed closed: tool said native_runner_process_exited: oops"))).toBe("native_provider_terminal_failed");
 });
 it("keeps an ACPX missing runtime package failure actionable and stops automatic retries", () => {
   const failure = new Error('PRP command session.open failed: {"result":{"code":"command_execution_failed","message":"failed to start ACPX provider: ACPX sidecar command session.open was rejected (retryable=false, classification=runtime_package_missing)"},"status":"failed"}');

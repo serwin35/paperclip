@@ -33,7 +33,7 @@ import {
 import { environmentService } from "../services/environments.js";
 import { applyQuotaPacingSettings } from "../services/quota-pacing.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
-import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertBoardOrgAccess, getActorInfo } from "./authz.js";
 
 function sameJsonValue(a: unknown, b: unknown): boolean {
   if (a === b) return true;
@@ -91,9 +91,7 @@ function publishActivitiesBestEffort(publications: ActivityPublication[], action
 }
 
 function assertCanManageInstanceSettings(req: Request) {
-  if (req.actor.type !== "board") {
-    throw forbidden("Board access required");
-  }
+  assertBoard(req);
   if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
     return;
   }

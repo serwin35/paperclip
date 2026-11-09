@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { crossingFaults, gradeR3, gradeR4, gradeR5, gradeTask, STALL_LIMIT_MS } from "./grader.js";
 import { isResting } from "./observer.js";
 import type { FaultReceipt, OracleArtifacts, RunSample, TaskRecord, TaskSample } from "./types.js";
-import { BENCH_EXPECTED, parseBenchRecord, r1TestChecksSlug, workloadDefinitions } from "./workloads.js";
+import { BENCH_EXPECTED, parseBenchRecord, r1TestChecksSlug, stallWakeChecks, workloadDefinitions } from "./workloads.js";
 
 const T0 = Date.parse("2026-11-06T12:00:00Z");
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
@@ -219,6 +219,34 @@ describe("T-oracles", () => {
     expect(workloadDefinitions.A1.grade("abcd1234", passingBrief).verdict).toBe("pass");
     expect(workloadDefinitions.C1.grade("abcd1234", passingBrief).checks.find(check => check.name.includes("followup"))?.ok).toBe(false);
     expect(workloadDefinitions.C1.grade("abcd1234", { ...passingBrief, documents: { brief: `${passingBrief.documents.brief}FOLLOWUP-abcd1234\n` } }).verdict).toBe("pass");
+  });
+
+  it("fails M1 when a subtask needed a board Retry, and checks the parent got one stall wake per stall", () => {
+    const done = record([sample(1_000, "done", [run("r1", "succeeded", 0, 900)])], { finalStatus: "done" });
+    const withChildRetry = { ...done, childRetries: [{ childIssueId: "c2", at: 1, observedRunId: "r", httpStatus: 200, accepted: true, error: null }] };
+    expect(gradeR3(done)).toMatchObject({ verdict: "n/a" });
+    expect(gradeR3(withChildRetry)).toMatchObject({ verdict: "fail", detail: "retry_needed_on_subtask_1 (c2)" });
+    const stalled = { issueStatus: "done", documents: {}, agentComments: [], files: {}, commands: {}, workspacePath: null,
+      childStalls: [{ childIssueId: "c2", recoveryActionId: "a1" }] };
+    const wakeA1 = { stalledIssueId: "c2", recoveryActionId: "a1" };
+    expect(stallWakeChecks({ ...stalled, stallWakes: [wakeA1] } as never)[0]).toMatchObject({ ok: true });
+    expect(stallWakeChecks({ ...stalled, stallWakes: [] } as never)[0]).toMatchObject({ ok: false, detail: "stalls=1 wakes=0 unwoken=c2:a1" });
+    expect(stallWakeChecks({ ...stalled, stallWakes: [wakeA1, wakeA1] } as never)[0]).toMatchObject({ ok: false });
+    const twoStalls = { ...stalled, childStalls: [...stalled.childStalls, { childIssueId: "c2", recoveryActionId: "a2" }] };
+    expect(stallWakeChecks({ ...twoStalls, stallWakes: [wakeA1] } as never)[0]).toMatchObject({ ok: false, detail: "stalls=2 wakes=1 unwoken=c2:a2" });
+    expect(stallWakeChecks({ ...twoStalls, stallWakes: [wakeA1, { stalledIssueId: "c2", recoveryActionId: "a2" }] } as never)[0]).toMatchObject({ ok: true });
+    expect(stallWakeChecks({ ...stalled, childStalls: [] } as never)).toEqual([]);
+  });
+
+  it("grades S1: stopped run cancelled, nothing ran before the continue comment, brief has both markers", () => {
+    const base: OracleArtifacts = { issueStatus: "done", documents: { brief: "CHAOS-abcd1234\nCONTINUE-abcd1234\n- one\n- two\n- three\n" },
+      agentComments: [], files: {}, commands: {}, workspacePath: null,
+      stop: { runId: "r1", runStatus: "cancelled", runsStartedBeforeContinue: [], continuePosted: true } };
+    expect(workloadDefinitions.S1.grade("abcd1234", base).verdict).toBe("pass");
+    const restarted = workloadDefinitions.S1.grade("abcd1234", { ...base, stop: { ...base.stop!, runsStartedBeforeContinue: ["r2"] } });
+    expect(restarted.checks.find(check => check.name === "nothing_ran_after_stop")).toMatchObject({ ok: false, detail: "continue=true runs=r2" });
+    expect(workloadDefinitions.S1.grade("abcd1234", { ...base, stop: { ...base.stop!, runStatus: "succeeded" } }).verdict).toBe("fail");
+    expect(workloadDefinitions.S1.grade("abcd1234", { ...base, stop: undefined }).verdict).toBe("fail");
   });
 
   it("grades B1 by running the tests and the CLI", () => {

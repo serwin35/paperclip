@@ -107,8 +107,17 @@ export interface ProjectDiscoveryPage {
   nextCursor: string | null;
 }
 
+export interface ProjectEnvironmentOptions {
+  groups: Array<{
+    storageProviderPluginId: string | null;
+    environments: Array<{ id: string; name: string }>;
+  }>;
+  defaultEnvironmentId: string | null;
+  error: string | null;
+}
+
 export interface ProjectWorkspaceProviderConfiguration {
-  source: "project" | "default" | "core";
+  source: "project" | "core";
   pluginId: string | null;
   displayName: string;
   providers: Array<{ id: string; displayName: string; isDefault: boolean }>;

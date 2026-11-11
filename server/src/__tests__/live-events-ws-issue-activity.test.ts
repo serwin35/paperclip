@@ -87,6 +87,9 @@ describeEmbeddedPostgres("live activity events on a readable task", () => {
         actorType: "agent", actorId: agent.id,
         // Upstream activityToastIdentity: the actor's name and avatar for the toast.
         actorName: "Coder", actorAppearance: null,
+        // Upstream: the task identifier read from the database and a closed boolean
+        // for task pickers, both derived after the task read check.
+        issueIdentifier: `${prefix}-12`, taskIdentityChanged: false,
         details: {
           identifier: `${prefix}-12`, issueTitle: "Ship the release",
           status: "done", source: "api", _previous: { status: "in_progress" },

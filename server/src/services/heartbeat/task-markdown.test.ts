@@ -53,6 +53,16 @@ describe("heartbeat task markdown rendering", () => {
       .not.toContain("Task clarification directive:");
   });
 
+  it("tells a chat agent the person's time zone only when it is known", () => {
+    const chat = { id: "chat", identifier: null, title: "Chat", conversationAgentId: "coordinator" };
+    const line = "The person's time zone is America/Chicago (from their browser). Read times and dates they give";
+    expect(buildPaperclipTaskMarkdown({ issue: chat, personTimeZone: "America/Chicago" })).toContain(line);
+    expect(buildPaperclipTaskMarkdown({ issue: chat, personTimeZone: "America/Chicago" })).toContain("save schedules such as routine triggers with that timezone; say the zone when you report a schedule.");
+    expect(buildPaperclipTaskMarkdown({ issue: chat, personTimeZone: null })).not.toContain("The person's time zone is");
+    expect(buildPaperclipTaskMarkdown({ issue: chat })).not.toContain("The person's time zone is");
+    expect(buildPaperclipTaskMarkdown({ issue, personTimeZone: "America/Chicago" })).not.toContain("The person's time zone is");
+  });
+
   it("shows inferred task proposals only for opted-in native conversations while preserving explicit creation", () => {
     const issue = { id: "chat", identifier: null, title: "Chat", conversationAgentId: "coordinator" };
     const classic = buildPaperclipTaskMarkdown({ issue, nativeRunner: true });
@@ -92,6 +102,19 @@ describe("heartbeat task markdown rendering", () => {
     expect(buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: true })).not.toContain("Status Cards:");
     expect(buildPaperclipTaskMarkdown({ issue: { ...chat, conversationAgentId: null }, nativeRunner: true, statusCardsEnabled: true }))
       .not.toContain("Status Cards:");
+  });
+  it("tells a standing chat to link a case's page by its identifier, only while the Cases experiment is enabled", () => {
+    const chat = { id: "chat", identifier: "RUN-1", title: "Chat", conversationAgentId: "ceo" };
+    const enabled = buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: true, casesEnabled: true })!;
+    expect(enabled).toContain("Cases:");
+    expect(enabled).toContain("/<prefix>/cases/<case identifier>");
+    expect(enabled).toContain("[RUN-C1](/<prefix>/cases/RUN-C1)");
+    // The named page is the board's real route.
+    const app = readFileSync(new URL("../../../../ui/src/App.tsx", import.meta.url), "utf8");
+    expect(app).toMatch(/path="cases\/:caseIdentifier"/);
+    expect(buildPaperclipTaskMarkdown({ issue: chat, nativeRunner: true })).not.toContain("Cases:");
+    expect(buildPaperclipTaskMarkdown({ issue: { ...chat, conversationAgentId: null }, nativeRunner: true, casesEnabled: true }))
+      .not.toContain("Cases:");
   });
   it("returns null without a task or a nonempty wake comment", () => {
     expect(buildPaperclipTaskMarkdown({ issue: null })).toBeNull();

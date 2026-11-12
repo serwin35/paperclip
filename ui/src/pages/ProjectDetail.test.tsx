@@ -267,7 +267,8 @@ describe("ProjectDetail", () => {
 
   it.each(["issues", "plugin-operations"])("removes cached %s after a real task-list denial", async tab => {
     mockLocation.pathname = `/projects/project-1/${tab}`;
-    const read = tab === "issues" ? mockIssuesApi.listAll : mockIssuesApi.list;
+    // Fork: both tabs load every page of the project's tasks through listAll.
+    const read = mockIssuesApi.listAll;
     read.mockResolvedValue([{ id: "private-task", companyId: "company-1" }]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);

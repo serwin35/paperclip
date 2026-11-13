@@ -33,7 +33,8 @@ Tylko teksty wyświetlane, które mają dokładne dopasowanie w słowniku:
 - stringi renderowane jako dziecko JSX (`{ok ? "Yes" : "No"}`),
 - etykiety `setBreadcrumbs([{ label: "..." }])` — nagłówki stron i tytuł karty,
 - całe moduły `.ts` z tekstem budowanym w kodzie, przez nadpisania w `modules/pl/`
-  (dziś `src/lib/timeAgo.ts` → „5 min temu”).
+  (dziś `src/lib/timeAgo.ts` → „5 min temu” i `src/lib/attention-views.ts` → zakładki „Dla Ciebie”,
+  „Nieprzypisane”, „Wszyscy” oraz teksty kart „Czeka na Ciebie”).
 
 Nigdy nie są dotykane: `src/api/**`, testy i stories, pliki i poddrzewa, których nazwa wskazuje na
 prompty, instrukcje, szablony albo konfigurację adapterów, oraz `<code>`, `<pre>`, `<textarea>`
@@ -67,11 +68,13 @@ Wynik przechodzi przez walidator; odrzucone tłumaczenia są wypisywane i nie tr
 
 ## Nadpisania modułów
 
-`modules/pl/src/lib/timeAgo.ts` zastępuje `src/lib/timeAgo.ts`. Pierwsza linia pliku to
+Plik `modules/pl/<ścieżka>` zastępuje `<ścieżka>` z `ui/`, np. `modules/pl/src/lib/timeAgo.ts` →
+`src/lib/timeAgo.ts`. Pierwsza linia pliku to
 `// overlay-upstream-sha256: <hash>` — SHA-256 wersji upstreamu, na podstawie której powstało
 nadpisanie. Gdy upstream zmieni plik, hash przestaje się zgadzać: wtyczka serwuje wtedy
 oryginał (po angielsku, ale poprawny), a `validate.ts` i `scan.ts` zgłaszają rozjazd.
-Po przeniesieniu zmian zaktualizuj hash: `shasum -a 256 ui/src/lib/timeAgo.ts`.
+Po przeniesieniu zmian zaktualizuj hash: `shasum -a 256 ui/src/lib/<moduł>.ts`. Nadpisanie zmienia
+wyłącznie teksty: eksporty pilnuje test, logikę sprawdź `diff ui/src/lib/<moduł>.ts` z nadpisaniem.
 
 ## Synchronizacja z upstreamem
 

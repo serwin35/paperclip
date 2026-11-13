@@ -31,6 +31,7 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | reviewer | recenzent | |
 | assignee | wykonawca | |
 | responsible | odpowiedzialny | |
+| owner (karty „Czeka na Ciebie”, decyzji) | odpowiedzialny | „No owner yet” → „Brak odpowiedzialnego”; nie „właściciel” (to rola board) |
 | board (rola człowieka) | właściciel | w widoku kanban „board view” → „widok tablicy” |
 | heartbeat | heartbeat | cykl pracy agenta; nie tłumaczymy |
 | run | uruchomienie | „Run now” → „Uruchom teraz” |
@@ -82,3 +83,10 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 
 „przed chwilą”, „5 min temu”, „3 godz. temu”, „1 dzień temu” / „4 dni temu”, „2 tyg. temu”,
 „3 mies. temu”. Skróty jednostek omijają polskie formy liczby mnogiej.
+
+## Widoki „Czeka na Ciebie” (nadpisanie `src/lib/attention-views.ts`)
+
+Zakładki: „Dla Ciebie”, „Nieprzypisane”, „Organizacja”, „Zarchiwizowane”, „Wszyscy”.
+„Unassigned” to tu karty bez odpowiedzialnego, nie zadania bez wykonawcy, więc zakładka nazywa się
+„Nieprzypisane” — tak samo jak przycisk banera „Otwórz nieprzypisane”, który ją otwiera.
+Baner: „1 karta / 3 karty / 5 kart nie ma(ją) odpowiedzialnego” (`Intl.PluralRules`).

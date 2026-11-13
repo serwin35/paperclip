@@ -4,5 +4,5 @@
     "allowImportingTsExtensions": false,
     "types": ["node"]
   },
-  "include": ["./*.ts", "./modules/**/*.ts", "../vite.config.ts"]
+  "include": ["./*.ts", "./modules/**/*.ts", "../vite.config.ts", "../src/vite-env.d.ts"]
 }

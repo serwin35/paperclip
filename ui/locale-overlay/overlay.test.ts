@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { createDictionary } from "./dictionary";
 import { checkModuleOverrides, sha256 } from "./module-overrides";
+import { unassignedBannerText } from "./modules/pl/src/lib/attention-views";
 import { applyOverlay } from "./overlay";
 import { UI_ROOT } from "./paths";
 import { localeOverlay } from "./vite-plugin-locale-overlay";
@@ -230,6 +231,14 @@ describe("module overrides", () => {
       expect(status.problem, status.relativePath).toBeNull();
       expect(exportedNames(status.overridePath)).toEqual(exportedNames(path.join(UI_ROOT, status.relativePath)));
     }
+  });
+
+  it("declines the unassigned banner count in Polish", () => {
+    expect(unassignedBannerText(1)).toBe("1 karta nie ma odpowiedzialnego");
+    expect(unassignedBannerText(3)).toBe("3 karty nie mają odpowiedzialnego");
+    expect(unassignedBannerText(22)).toBe("22 karty nie mają odpowiedzialnego");
+    expect(unassignedBannerText(5)).toBe("5 kart nie ma odpowiedzialnego");
+    expect(unassignedBannerText(12)).toBe("12 kart nie ma odpowiedzialnego");
   });
 
   it("reports drift when the upstream module changed", () => {

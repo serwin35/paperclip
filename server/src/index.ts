@@ -1878,13 +1878,14 @@ async function startServerWithDatabaseTeardown(
       });
       await pass("DeferredReceipt", () => heartbeat.registerDeferredReceiptWork(deliveryWork,
       () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped).ready);
+      // Fork: with pacing on, wait for its first quota poll (bounded by the quota timeout) before usage-limit
+      // resumes, queued runs and scheduled retries start, so a restart with a full queue does not start every
+      // run at the configured limit. `ready` never rejects, so it stays outside `pass()`.
+      await quotaPacing.ready;
     // A connected conversation's Retry needs the chat callback createApp registered.
       await pass("ProviderLimitResume", () => heartbeat.registerProviderLimitResumeWork(deliveryWork,
       () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped,
       () => budgetResumeDelivery.prepareChatRetry).ready);
-      // Fork: with pacing on, wait for its first quota poll (bounded by the quota timeout) before queued runs and
-      // scheduled retries start, so a restart with a full queue does not start every run at the configured limit.
-      await quotaPacing.ready;
       await pass("RunDispatch", async () => {
         const work = heartbeat.registerRunDispatchWork(deliveryWork,
           () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);

@@ -34,6 +34,7 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import { fetchCompanyQuotaWindows } from "../services/quota-windows.js";
 import { getQuotaPacingState } from "../services/quota-pacing.js";
+import { attentionHandledDetails, attentionHandledFor } from "../services/attention-receipts.js";
 import { badRequest, forbidden } from "../errors.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
@@ -387,8 +388,17 @@ export function costRoutes(
       const companyId = req.params.companyId as string;
       const incidentId = req.params.incidentId as string;
       assertCompanyAccess(req, companyId);
-      const incident = await budgets.resolveIncident(companyId, incidentId, req.body, req.actor.userId ?? "board",
-        req.actor.source ?? null);
+      const actorUserId = req.actor.userId ?? "board";
+      // A hard stop is the budget owner's card. When someone else raises or
+      // keeps the limit, read that before the incident closes, so the owner
+      // gets "Kept paused by @x" or "Limit raised by @x", the verbs of the
+      // card's buttons and of Decision history (PAP-749 plan §6; PAP-767).
+      const handledFor = await attentionHandledFor(
+        db, companyId, { sourceKind: "budget_alert", sourceId: incidentId }, req.actor.userId,
+      );
+      const incident = await budgets.resolveIncident(companyId, incidentId, req.body, actorUserId, req.actor.source ?? null, {
+        activityDetails: attentionHandledDetails(handledFor, req.body.action === "keep_paused" ? "kept_paused" : "limit_raised"),
+      });
       res.json(incident);
     },
   );

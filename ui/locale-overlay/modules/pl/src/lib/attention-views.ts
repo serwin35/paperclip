@@ -137,7 +137,7 @@ export function describeAttentionAudience(
     if (audience.userId !== currentUserId) return { kind: "other", userId: audience.userId };
     // "Transferred by @x" replaces "Sent to you" (PAP-749 plan §6, Rule 12).
     if (audience.transferredByUserId) {
-      return { kind: "mine", text: "Przekazane przez", transferredByUserId: audience.transferredByUserId };
+      return { kind: "mine", text: "Przekazana przez", transferredByUserId: audience.transferredByUserId };
     }
     const text = attentionAudienceReasonText(audience.reason);
     return text ? { kind: "mine", text } : null;

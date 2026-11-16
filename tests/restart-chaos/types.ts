@@ -271,6 +271,7 @@ export interface RunSample {
   processAlive?: boolean;
   /** A provider turn started and has no turn terminal yet. */
   providerTurnActive?: boolean;
+  preparing?: boolean;
 }
 
 export interface InterruptionSample {
@@ -294,6 +295,7 @@ export interface TaskSample {
   recoveryOwner?: string | null;
   executionBlocker?: boolean;
   scheduledRetry?: boolean;
+  waitingOnChildren?: boolean;
   runs?: RunSample[];
 }
 

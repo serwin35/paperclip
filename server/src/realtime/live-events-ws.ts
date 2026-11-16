@@ -12,6 +12,7 @@ import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent }
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { activityToastIdentity } from "./activity-toast-identity.js";
+import { recentSubtaskParents } from "./recent-subtask-parents.js";
 import { taskToastEligible } from "./task-toast-eligibility.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
@@ -329,7 +330,12 @@ export function setupLiveEventsWebSocketServer(
         if (event.type === "activity.logged" && event.payload.entityType === "issue") {
           return { ...event, payload: { ...event.payload,
             taskIdentityChanged: issueActivityChangesTaskIdentity(event.payload.action, event.payload.details),
-            ...await activityToastIdentity(db, event.companyId, event.payload) } };
+            ...await activityToastIdentity(db, event.companyId, event.payload),
+            ...await recentSubtaskParents(db, context!.actor, event.companyId, event.payload, reads) } };
+        }
+        if (event.type === "heartbeat.run.status" || event.type === "heartbeat.run.queued") {
+          return { ...event, payload: { ...event.payload,
+            ...await recentSubtaskParents(db, context!.actor, event.companyId, event.payload, reads) } };
         }
         return event;
       }
@@ -352,13 +358,14 @@ export function setupLiveEventsWebSocketServer(
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
       const runId = typeof payload.runId === "string" ? payload.runId
         : payload.entityType === "heartbeat_run" && typeof payload.entityId === "string" ? payload.entityId : null;
-      if (event.type === "heartbeat.run.event" || event.type === "heartbeat.run.log") {
+      if (event.type === "heartbeat.run.event" || event.type === "heartbeat.run.log" || event.type === "heartbeat.run.tool_progress") {
         const allowed = await sharedDeliveryRead(reads, "transcript-scope", async () => (await access.decide({
           actor: context!.actor, action: "company_scope:read",
           resource: { type: "company", companyId: event.companyId } })).allowed);
         if (!allowed) return null;
       }
       const readBindings: Parameters<typeof getHeartbeatRunReadDecisions>[3][number][] = [];
+      let navigationTask: { id: string; parentId: string | null } | undefined;
       if (issueId) {
         readBindings.push({ companyId: event.companyId, scopeKind: "issue", issueId });
       }
@@ -367,9 +374,13 @@ export function setupLiveEventsWebSocketServer(
           companyId: heartbeatRuns.companyId,
           scopeKind: heartbeatRuns.scopeKind,
           issueId: heartbeatRuns.issueId,
-        }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId))))[0]);
+          // Reuse this narrow binding for navigation hints after authorization.
+          parentId: issues.parentId,
+        }).from(heartbeatRuns).leftJoin(issues, and(eq(issues.id, heartbeatRuns.issueId), eq(issues.companyId, heartbeatRuns.companyId)))
+          .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId))))[0]);
         if (!run) return null;
         readBindings.push(run);
+        if (run.issueId) navigationTask = { id: run.issueId, parentId: run.parentId };
       }
       if (!(await sharedDeliveryRead(reads, `read:${issueId ?? ""}:${runId ?? ""}`, async () =>
         (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) return null;
@@ -386,7 +397,12 @@ export function setupLiveEventsWebSocketServer(
         if (!project || !(await access.decide({ actor: context!.actor, action: "project:read",
           resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) return null;
       }
-      if (event.type.startsWith("heartbeat.run.")) return runId ? event : null;
+      if (event.type.startsWith("heartbeat.run.")) {
+        if (!runId) return null;
+        return event.type === "heartbeat.run.status" || event.type === "heartbeat.run.queued"
+          ? { ...event, payload: { ...event.payload, ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads, navigationTask) } }
+          : event;
+      }
       if (event.type === "agent.session.goal.changed") return issueId ? event : null;
       // Fork: the toast label of activity on a task, read only after the batched
       // check above let this viewer read that task.
@@ -413,6 +429,7 @@ export function setupLiveEventsWebSocketServer(
         ...(issueId ? await activityToastIdentity(db, event.companyId, payload) : {}),
         // Fork: the readable task's identifier, title and allowlisted change fields for the toast label.
         ...(readableIssue ? issueActivityToastFields(payload, readableIssue) : {}),
+        ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "agent.runtime_state.updated") return { ...event, payload: { agentId: payload.agentId } };

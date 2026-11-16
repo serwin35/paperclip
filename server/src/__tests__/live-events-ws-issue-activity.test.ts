@@ -90,6 +90,8 @@ describeEmbeddedPostgres("live activity events on a readable task", () => {
         // Upstream: the task identifier read from the database and a closed boolean
         // for task pickers, both derived after the task read check.
         issueIdentifier: `${prefix}-12`, taskIdentityChanged: false,
+        // Upstream recentSubtaskParents: readable parents for sidebar subtask groups.
+        recentSubtaskParentIds: [],
         details: {
           identifier: `${prefix}-12`, issueTitle: "Ship the release",
           status: "done", source: "api", _previous: { status: "in_progress" },

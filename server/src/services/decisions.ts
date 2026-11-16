@@ -552,7 +552,7 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
           const created = await svc.create(decision.companyId, { title: draft.title, description: draft.description ?? null, parentId: draft.parentId ?? target.id,
             assigneeAgentId: draft.assigneeAgentId ?? null, assigneeUserId: draft.assigneeUserId ?? null, projectId: draft.projectId ?? target.projectId,
             goalId: draft.goalId ?? null, blockedByIssueIds: draft.blockedByIssueIds ?? [], createdByUserId: decidedByUserId, actorRunId: decision.originRunId,
-            idempotencyKey: `decision-effect:${decision.id}:${effectIndex}` });
+            idempotencyKey: `decision-effect:${decision.id}:${effectIndex}` }, tx);
           result = { issueId: created.id };
         } else {
           const cancelled = [target.id, ...cancellationDescendantIds!].reverse();

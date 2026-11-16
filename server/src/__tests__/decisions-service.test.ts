@@ -148,6 +148,20 @@ describePg("decisionService", () => {
       ...(creator === "agent" ? { createdByAgentId: agentId, createdByUserId: null } : { createdByUserId: decidedByUserId }) });
   });
 
+  it("creates a create_issue child task that its own parent task blocks", async () => {
+    const created = await service().create({
+      companyId, actor: agentActor(), agentId, runId, title: "Create blocked follow-up?", body: "Body",
+      options: [{ id: "yes", label: "Yes", effects: [{ type: "create_issue", targetIssueId, staleness: "strict",
+        draft: { title: "Blocked follow-up", blockedByIssueIds: [targetIssueId] } }] }],
+    });
+    const result = await service().decide({ id: created.id, optionId: "yes", decidedByUserId, userActor: boardActor() });
+    expect(result.executions[0]).toMatchObject({ status: "executed", result: { issueId: expect.any(String) } });
+    const childId = (result.executions[0]!.result as { issueId: string }).issueId;
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0]).toMatchObject({ parentId: targetIssueId });
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, childId)))
+      .toEqual([expect.objectContaining({ issueId: targetIssueId, type: "blocks" })]);
+  });
+
   it("allows one double-decide winner and rejects the loser", async () => {
     // Repeating the same option is a valid replay if the first request already
     // won. Distinct choices exercise contention regardless of query scheduling.

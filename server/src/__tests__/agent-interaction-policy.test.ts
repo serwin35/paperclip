@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, authUsers, companies, companyMemberships, createDb, issues, principalPermissionGrants,
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import { AGENT_INTERACTION_PERMISSION_KEYS, type AgentInteractionPermissionKey } from "@paperclipai/shared";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { agentInteractionDenial, assertAgentInteraction, type AgentInteractionInput } from "../services/agent-interaction-policy.js";
 import { authorizationService, authorizationDeniedDetails } from "../services/authorization.js";
@@ -162,6 +162,38 @@ describe("agent interaction authorization", () => {
       await tx.update(issues).set({ title: "Must not persist" }).where(eq(issues.id, f.task.id));
     })).rejects.toMatchObject({ status: 403 });
     expect((await db.select({ title: issues.title }).from(issues).where(eq(issues.id, f.task.id)))[0]?.title).toBe("Authorized before revocation");
+  });
+
+  it("keeps checked task owners fixed without blocking new child tasks of those tasks", async () => {
+    const f = await seed();
+    let locked!: () => void;
+    const ready = new Promise<void>(resolve => { locked = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holder = db.transaction(async tx => {
+      await assertAgentInteraction(tx, input(f, "assign", {
+        issueId: f.own.id, parentIssueId: f.task.id, targetAgentId: f.targetAgentId, lock: true }));
+      locked();
+      await held;
+    });
+    await ready;
+    try {
+      await db.transaction(async tx => {
+        await tx.execute(sql`set local lock_timeout = '2s'`);
+        await tx.insert(issues).values([f.task.id, f.own.id].map(parentId => ({
+          companyId: f.companyId, title: "Child", status: "todo", parentId })));
+        await assertAgentInteraction(tx, input(f, "assign", {
+          parentIssueId: f.task.id, targetAgentId: f.targetAgentId, lock: true }));
+      });
+      for (const id of [f.task.id, f.own.id]) {
+        await expect(db.transaction(async tx => {
+          await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, id)).for("no key update", { noWait: true });
+        })).rejects.toMatchObject({ cause: { code: "55P03" } });
+      }
+    } finally {
+      release();
+      await holder;
+    }
   });
 
   it("uses trusted plugin origin even when a handler labels the operation human or another agent", async () => {

@@ -45,10 +45,15 @@ export async function agentInteractionDenial(
   if (!actorAgentId) return null;
 
   const issueIds = [...new Set([input.issueId, input.parentIssueId].filter((id): id is string => Boolean(id)))].sort();
-  const taskQuery = issueIds.length ? db.select({
+  const taskQuery = (ids: string[]) => db.select({
     id: issues.id, assigneeAgentId: issues.assigneeAgentId, conversationAgentId: issues.conversationAgentId,
-  }).from(issues).where(and(eq(issues.companyId, input.companyId), inArray(issues.id, issueIds))).orderBy(issues.id) : null;
-  const tasks = taskQuery ? await (input.lock ? taskQuery.for("update") : taskQuery) : [];
+  }).from(issues).where(and(eq(issues.companyId, input.companyId), inArray(issues.id, ids))).orderBy(issues.id);
+  const tasks: Awaited<ReturnType<typeof taskQuery>> = [];
+  if (input.lock) {
+    for (const id of issueIds) tasks.push(...await taskQuery([id]).for(id === input.issueId ? "no key update" : "share"));
+  } else if (issueIds.length) {
+    tasks.push(...await taskQuery(issueIds));
+  }
   if (tasks.length !== issueIds.length) throw notFound("Task not found");
   const issue = tasks.find(task => task.id === input.issueId);
   const parent = tasks.find(task => task.id === input.parentIssueId);

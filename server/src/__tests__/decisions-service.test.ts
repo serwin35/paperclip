@@ -24,6 +24,7 @@ import {
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { attentionService } from "../services/attention.js";
 import { decisionService } from "../services/decisions.js";
+import { withPluginInteractionOrigin } from "../services/plugin-interaction-context.js";
 import { signDecisionSpec } from "../services/decision-signing.js";
 import * as retentionModule from "../services/decision-retention.js";
 import { hashAttentionArchiveManifest } from "../services/decision-retention.js";
@@ -132,6 +133,19 @@ describePg("decisionService", () => {
     expect(audit[0]?.details).toMatchObject({ decidedByUserId, originResponsibleUserId });
     expect(first.executions[0]?.activityLogId).toBe(audit[0]?.id);
     expect(wakes).toHaveLength(1);
+  });
+
+  it.each(["user", "agent"] as const)("creates the child task of a create_issue effect under the target task as %s", async creator => {
+    const created = await service().create({
+      companyId, actor: agentActor(), agentId, runId, title: "Create follow-up?", body: "Body",
+      options: [{ id: "yes", label: "Yes", effects: [{ type: "create_issue", targetIssueId, staleness: "strict", draft: { title: "Follow-up" } }] }],
+    });
+    const decide = () => service().decide({ id: created.id, optionId: "yes", decidedByUserId, userActor: boardActor() });
+    const result = creator === "agent" ? await withPluginInteractionOrigin({ companyId, agentId }, decide) : await decide();
+    expect(result.executions[0]).toMatchObject({ status: "executed", result: { issueId: expect.any(String) } });
+    const childId = (result.executions[0]!.result as { issueId: string }).issueId;
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0]).toMatchObject({ parentId: targetIssueId, title: "Follow-up",
+      ...(creator === "agent" ? { createdByAgentId: agentId, createdByUserId: null } : { createdByUserId: decidedByUserId }) });
   });
 
   it("allows one double-decide winner and rejects the loser", async () => {

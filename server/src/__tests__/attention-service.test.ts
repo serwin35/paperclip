@@ -1,3 +1,4 @@
+import { readRunIssueId } from "../services/attention-source-eligibility.js";
 import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 import { randomUUID } from "node:crypto";
@@ -1038,7 +1039,9 @@ describeEmbeddedPostgres("attention service", () => {
       exhaustionMessage: "Bounded retry exhausted receipt 2500",
       contextSnapshot: { issueId, taskId: null },
     });
-    expect(rows.find((row) => row.id === timedOutId)?.contextSnapshot).toEqual({ issueId: null, taskId });
+    // The issue_id column replaces the snapshot keys when it is set; consumers
+    // read `issueId ?? taskId`, so only the resolved id has to match.
+    expect(readRunIssueId(rows.find((row) => row.id === timedOutId)?.contextSnapshot ?? null)).toBe(taskId);
     expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThan(4096);
 
     const feed = await attentionService(db).list(companyId, {

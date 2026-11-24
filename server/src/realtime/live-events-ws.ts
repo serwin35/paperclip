@@ -58,7 +58,8 @@ import { canActorReadCase } from "../services/case-access.js";
 interface ReadableIssue {
   id: string;
   identifier: string | null;
-  title: string;
+  /** Already passed upstream's notification redaction; null when it was withheld. */
+  title: string | null;
 }
 
 // Scalar change fields an issue toast and its query invalidation read. Other
@@ -81,9 +82,9 @@ function isScalar(value: unknown) {
 // viewer was just authorized to read, never from the event details.
 function issueActivityToastFields(payload: Record<string, unknown>, issue: ReadableIssue) {
   const details = asRecord(payload.details) ?? {};
-  const visible: Record<string, unknown> = { issueTitle: issue.title };
+  const visible: Record<string, unknown> = issue.title ? { issueTitle: issue.title } : {};
   if (issue.identifier) visible.identifier = issue.identifier;
-  if (typeof details.title === "string") visible.title = issue.title;
+  if (typeof details.title === "string" && issue.title) visible.title = issue.title;
   for (const key of ISSUE_ACTIVITY_DETAIL_KEYS) {
     if (isScalar(details[key])) visible[key] = details[key];
   }
@@ -423,6 +424,9 @@ export function setupLiveEventsWebSocketServer(
       // Company-wide invalidations carry no task-derived content. Authorized
       // clients obtain details through viewer-filtered HTTP reads. Activity on a
       // task this viewer may read also keeps what its toast needs.
+      // Fork: one identity read feeds both upstream's fields and the toast label, so the
+      // label uses the title upstream redacted for notifications, never the raw row.
+      const activityIdentity = event.type === "activity.logged" && issueId ? await readActivityIdentity(event) : {};
       if (event.type === "activity.logged") return { ...event, payload: {
         action: payload.action, entityType: payload.entityType, entityId: payload.entityId,
         // A handoff can attach the first case to a task. Its already-authorized
@@ -434,9 +438,12 @@ export function setupLiveEventsWebSocketServer(
           ? { taskIdentityChanged: issueActivityChangesTaskIdentity(payload.action, payload.details) }
           : {}),
         // The task read check above authorizes attribution, but not arbitrary details.
-        ...(issueId ? await readActivityIdentity(event) : {}),
+        ...activityIdentity,
         // Fork: the readable task's identifier, title and allowlisted change fields for the toast label.
-        ...(readableIssue ? issueActivityToastFields(payload, readableIssue) : {}),
+        ...(readableIssue ? issueActivityToastFields(payload, {
+          ...readableIssue,
+          title: "issueTitle" in activityIdentity && typeof activityIdentity.issueTitle === "string" ? activityIdentity.issueTitle : null,
+        }) : {}),
         ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };

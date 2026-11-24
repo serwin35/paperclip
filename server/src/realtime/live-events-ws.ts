@@ -11,7 +11,7 @@ import { agentApiKeys, companyMemberships, instanceUserRoles, heartbeatRuns, iss
 import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
-import { activityToastIdentity } from "./activity-toast-identity.js";
+import { createActivityToastIdentity } from "./activity-toast-identity.js";
 import { recentSubtaskParents } from "./recent-subtask-parents.js";
 import { taskToastEligible } from "./task-toast-eligibility.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
@@ -301,6 +301,7 @@ export function setupLiveEventsWebSocketServer(
 ) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const redactRunEvent = createLiveRunEventRedactor(db);
+  const readActivityIdentity = createActivityToastIdentity(db);
   const cleanupByClient = new Map<WsSocket, () => void>();
   const aliveByClient = new Map<WsSocket, boolean>();
 
@@ -328,9 +329,16 @@ export function setupLiveEventsWebSocketServer(
         || !(await canActorReadCase(db, context!.actor, { id: event.payload.entityId, companyId: event.companyId })))) return null;
       if (context!.actor.source === "local_implicit") {
         if (event.type === "activity.logged" && event.payload.entityType === "issue") {
+          const identity = await readActivityIdentity(event);
+          const details = event.payload.details && typeof event.payload.details === "object" && !Array.isArray(event.payload.details)
+            ? event.payload.details as Record<string, unknown> : {};
           return { ...event, payload: { ...event.payload,
+            ...(event.payload.action === "issue.comment_added" ? { details: { ...details,
+              changes: undefined,
+              issueTitle: "issueTitle" in identity ? identity.issueTitle : undefined,
+              bodySnippet: "notificationDetails" in identity ? identity.notificationDetails?.bodySnippet : undefined } } : {}),
             taskIdentityChanged: issueActivityChangesTaskIdentity(event.payload.action, event.payload.details),
-            ...await activityToastIdentity(db, event.companyId, event.payload),
+            ...identity,
             ...await recentSubtaskParents(db, context!.actor, event.companyId, event.payload, reads) } };
         }
         if (event.type === "heartbeat.run.status" || event.type === "heartbeat.run.queued") {
@@ -426,7 +434,7 @@ export function setupLiveEventsWebSocketServer(
           ? { taskIdentityChanged: issueActivityChangesTaskIdentity(payload.action, payload.details) }
           : {}),
         // The task read check above authorizes attribution, but not arbitrary details.
-        ...(issueId ? await activityToastIdentity(db, event.companyId, payload) : {}),
+        ...(issueId ? await readActivityIdentity(event) : {}),
         // Fork: the readable task's identifier, title and allowlisted change fields for the toast label.
         ...(readableIssue ? issueActivityToastFields(payload, readableIssue) : {}),
         ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads),
@@ -434,6 +442,8 @@ export function setupLiveEventsWebSocketServer(
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "agent.runtime_state.updated") return { ...event, payload: { agentId: payload.agentId } };
       if (event.type === "external_object.updated") return { ...event, payload: { externalObjectId: payload.externalObjectId } };
+      // Only the id: reading the checklist itself goes through the board-only API.
+      if (event.type === "agent_setup_progress.updated") return { ...event, payload: { progressId: payload.progressId } };
       if (event.type.startsWith("plugin.")) return event;
       return null;
     }

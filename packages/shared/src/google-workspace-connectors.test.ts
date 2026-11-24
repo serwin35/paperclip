@@ -7,8 +7,23 @@ import {
   googleWorkspaceSelectedScopes, googleWorkspaceEffectiveScopes, GOOGLE_WORKSPACE_DEFAULT_SELECTION,
   googleWorkspaceDraftRequestedScopes, GOOGLE_WORKSPACE_SERVICE_GROUPS, GOOGLE_WORKSPACE_SUBMITTED_SCOPES,
   GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS, googleWorkspaceProfileWithinSubmittedScopes,
-  type GoogleWorkspaceServiceSelection,
+  GOOGLE_WORKSPACE_TOOL_TRANSPORT, googleWorkspaceServiceToolNames, googleWorkspaceSelectionForScopes,
+  googleWorkspaceToolTitle, type GoogleWorkspaceServiceSelection,
 } from "./google-workspace-connectors.js";
+
+describe("googleWorkspaceToolTitle", () => {
+  it("names a Google tool by service and action, never by its internal name", () => {
+    expect(googleWorkspaceToolTitle("gmail__get_message")).toBe("Gmail: Get message");
+    expect(googleWorkspaceToolTitle("gmail__get_message", "Read a message")).toBe("Gmail: Read a message");
+    expect(googleWorkspaceToolTitle("calendar__list_events", "Calendar: List events")).toBe("Calendar: List events");
+    expect(googleWorkspaceToolTitle("search__search_corpus")).toBe("Workspace search: Search corpus");
+  });
+
+  it("returns the given title for anything that is not an allowlisted Google tool", () => {
+    expect(googleWorkspaceToolTitle("gmail__send_message")).toBeNull();
+    expect(googleWorkspaceToolTitle("create_issue", " Create issue ")).toBe("Create issue");
+  });
+});
 
 const scope = (value: string) => `https://www.googleapis.com/auth/${value}`;
 
@@ -29,7 +44,8 @@ describe("combined Google Workspace consent", () => {
 
   it("defaults to Gmail, combined Drive, and Calendar write scopes without Chat or People", () => {
     const selected = googleWorkspaceSelectedScopes(GOOGLE_WORKSPACE_DEFAULT_SELECTION);
-    expect(selected).toHaveLength(9);
+    expect(selected).toHaveLength(10);
+    expect(googleWorkspaceSelectedScopes({ gmail: "read", drive: "read", calendar: "read" })).toHaveLength(8);
     expect(selected).toContain(scope("gmail.compose"));
     expect(selected.some(value => /chat|contacts|directory|userinfo/.test(value))).toBe(false);
     expect(googleWorkspaceSelectedScopes({})).toEqual([]);
@@ -45,6 +61,38 @@ describe("combined Google Workspace consent", () => {
     expect(isGoogleWorkspaceToolGranted("docs__read_doc", effective)).toBe(true);
     expect(googleWorkspaceEffectiveScopes([scope("documents")], [scope("documents.readonly")])).toEqual([scope("documents.readonly")]);
   });
+  it("requests the free/busy permission with read and write Calendar access", () => {
+    expect(googleWorkspaceSelectedScopes({ calendar: "read" })).toEqual([
+      scope("calendar.calendarlist.readonly"), scope("calendar.events.freebusy"), scope("calendar.events.readonly"),
+    ]);
+    expect(googleWorkspaceSelectedScopes({ calendar: "write" })).toEqual([
+      scope("calendar.calendarlist.readonly"), scope("calendar.events"), scope("calendar.events.freebusy"),
+    ]);
+    expect([...profiles["calendar.write"].scopes]).toEqual([scope("calendar.calendarlist.readonly"), scope("calendar.events")]);
+  });
+
+  it("keeps Calendar read and write access for grants made before and after free/busy was requested", () => {
+    const before = [scope("calendar.calendarlist.readonly"), scope("calendar.events")];
+    const after = googleWorkspaceSelectedScopes({ calendar: "write" });
+    for (const [requested, granted] of [[before, before], [after, after], [after, before]]) {
+      const effective = googleWorkspaceEffectiveScopes(requested!, granted!);
+      expect(effective).toEqual(granted);
+      expect(googleWorkspaceSelectionForScopes(effective)).toEqual({ calendar: "write" });
+      for (const tool of ["list_calendars", "list_events", "suggest_time", "create_event", "delete_event"]) {
+        expect(isGoogleWorkspaceToolGranted(`calendar__${tool}`, effective), tool).toBe(true);
+      }
+    }
+    expect(googleWorkspaceSelectionForScopes(googleWorkspaceSelectedScopes({ calendar: "read" }))).toEqual({ calendar: "read" });
+  });
+
+  it("does not record a free/busy permission that Google did not grant", () => {
+    const write = googleWorkspaceSelectedScopes({ calendar: "write" });
+    expect(googleWorkspaceEffectiveScopes(write, [scope("calendar.events")])).toEqual([scope("calendar.events")]);
+    expect(googleWorkspaceEffectiveScopes(googleWorkspaceSelectedScopes({ calendar: "read" }), [scope("calendar.events")]))
+      .toEqual([scope("calendar.events.readonly")]);
+    expect(googleWorkspaceEffectiveScopes([scope("calendar.events")], write)).toEqual([scope("calendar.events")]);
+  });
+
   it("limits every selectable service combination to the 14 scopes submitted for Google verification", () => {
     const submitted = [
       "gmail.readonly", "gmail.compose",
@@ -122,6 +170,17 @@ describe("combined Google Workspace consent", () => {
     for (const name of ["gmail__send_message", "chat__list_members", "docs__delete_doc", "evil__get_message", "__proto____get_message", "gmail__constructor"])
       expect(googleWorkspaceToolTarget(name)).toBeNull();
     expect(isGoogleWorkspaceToolGranted("gmail__send_message", profiles["workspace.all"].scopes)).toBe(false);
+  });
+
+  it("runs the six launch services on Paperclip's REST tools, keeps the others on Google's MCP servers, and reports the transport on each target", () => {
+    expect(Object.keys(GOOGLE_WORKSPACE_TOOL_TRANSPORT).sort()).toEqual(Object.keys(GOOGLE_WORKSPACE_SERVICES).sort());
+    expect(GOOGLE_WORKSPACE_TOOL_TRANSPORT).toEqual({
+      gmail: "paperclip_rest", drive: "paperclip_rest", docs: "paperclip_rest", sheets: "paperclip_rest",
+      slides: "paperclip_rest", calendar: "paperclip_rest", chat: "google_mcp", people: "google_mcp", search: "google_mcp",
+    });
+    expect(googleWorkspaceToolTarget("gmail__get_message")?.transport).toBe("paperclip_rest");
+    expect(googleWorkspaceToolTarget("chat__list_messages")?.transport).toBe("google_mcp");
+    expect(googleWorkspaceServiceToolNames("docs")).toEqual(["read_doc", "update_doc"]);
   });
 
   it("never substitutes requested scopes for actual consent", () => {

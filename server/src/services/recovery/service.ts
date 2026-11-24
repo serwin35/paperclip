@@ -17,6 +17,7 @@ import { REUSABLE_SANDBOX_RESUME_FAILED_CODE } from "../reusable-sandbox-resume-
 import { PLUGIN_WORKER_UNAVAILABLE_CODE } from "../plugin-worker-unavailable-error.js";
 import { ENVIRONMENT_PROVIDER_UNAVAILABLE_CODE } from "../environment-provider-unavailable-error.js";
 import { RUNNER_REVISION_MISMATCH_CODE } from "../runner-revision-mismatch.js";
+import { NATIVE_SANDBOX_DISK_FULL } from "../native-runtime/native-sandbox-disk-full.js";
 import { recoveryRunContextColumn, recoveryRunVersionColumn } from "./run-context-read.js";
 import { recoveryRunResultColumn } from "./run-result-read.js";
 import { readLegacyDispositionSource } from "./legacy-disposition-read.js";
@@ -25,7 +26,9 @@ import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait
 import { quotaResetSpreadMs } from "../provider-quota-retry.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
+import { PROJECT_STORAGE_ENVIRONMENT_INCOMPATIBLE } from "../project-storage-environment-reason.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
+import { ensureNativePlanReviewCard } from "../native-runtime/native-plan-review-card.js";
 import { hasCommittedNativeConversationTurnWait, hasCommittedNativeResponseWakeWait } from "../native-runtime/native-response-wake-wait.js";
 import { listExternalReviewWaits } from "../native-runtime/external-review-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -42,7 +45,6 @@ import {
 } from "./legacy-continuation.js";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController, legacyControllerBootId, liveLegacyControllerExpiresAt } from "../legacy-controller-lease.js";
 import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
-import { instanceSettingsService } from "../instance-settings.js";
 import { NATIVE_STATUS_COMMITTER_ACTOR_ID } from "../issue-rewake-throttle.js";
 import { isWaitingConversation, settleConversationTurnForRun, deliverConversationComments } from "../agent-conversations.js";
 import {
@@ -131,7 +133,7 @@ import { isBoardOwnedBudgetBlock } from "../budget-block-ownership.js";
 import { unadmittedChatWakeupCondition } from "../durable-chat-wakeup.js";
 import { issueRecoveryActionService, SOURCE_TERMINAL_RESOLUTION } from "../issue-recovery-actions.js";
 import { PROVIDER_LIMIT_DEFAULT_COOLDOWN_MS } from "../system-recovery-state.js";
-import { parseProviderQuotaClockReset } from "../provider-quota-reset.js";
+import { isProviderQuotaActionRequired, parseProviderQuotaClockReset } from "../provider-quota-reset.js";
 import { hasUnverifiedNativeWorkspaceFinalizationOwner } from "../native-runtime/native-workspace-finalization-recovery-state.js";
 import {
   legacyExecutionNeedsReconciliationWithEvidence,
@@ -175,6 +177,7 @@ import {
 } from "./successful-run-handoff.js";
 import {
   SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON,
+  PROJECT_STORAGE_ENVIRONMENT_NEXT_ACTION,
   sandboxProviderPluginRemedy,
   buildExecutionReviewParticipantRecoveryNoticeSeed,
   buildExecutionReviewParticipantUnavailableNoticeSeed,
@@ -475,6 +478,7 @@ function readRecoveryRunErrorFamily(latestRun: LatestIssueRun) {
 }
 
 function isProviderQuotaRecovery(latestRun: LatestIssueRun) {
+  if (isProviderQuotaActionRequired(latestRun)) return false;
   if (latestRun?.errorCode === "provider_quota") return true;
   if (readRecoveryRunErrorFamily(latestRun) === "provider_quota") return true;
   if (latestRun?.errorCode !== "adapter_failed") return false;
@@ -618,6 +622,7 @@ const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   "project_access_denied",
   "native_provider_model_rejected",
   "provider_tool_definition_invalid",
+  NATIVE_SANDBOX_DISK_FULL,
   "adapter_engine_unavailable",
   "agent_not_invokable",
   "agent_not_found",
@@ -686,6 +691,7 @@ export function classifyAdapterFailureForRecovery(
   >,
   now = new Date(),
 ): AdapterFailureRecoveryClassification {
+  if (isProviderQuotaActionRequired(latestRun, now)) return null;
   // An engine prerequisite cannot be repaired by asking the same unavailable
   // engine to retry. Use the existing configuration-blocker path.
   if (latestRun.errorCode === "adapter_engine_unavailable" || latestRun.errorCode === "provider_tool_definition_invalid" || latestRun.errorCode === "native_provider_model_rejected") {
@@ -779,7 +785,8 @@ export function classifyContinuationFailure(
       errorCode,
     };
   }
-  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
+  if (isAiAuthenticationBlocked(latestRun) || isProviderQuotaActionRequired(latestRun)
+      || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
     return {
       kind: "non_retryable",
       maxAttempts: 0,
@@ -2804,6 +2811,8 @@ export function recoveryService(
                       ? "Reconnect the selected AI account or choose an available connection, then continue the task."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === RESTRICTED_WORKSPACE_SOURCE_REASON
                       ? "Retry the task."
+                      : readConfigurationIncompletePayload(input.latestRun)?.reason === PROJECT_STORAGE_ENVIRONMENT_INCOMPATIBLE
+                      ? PROJECT_STORAGE_ENVIRONMENT_NEXT_ACTION
                       : readConfigurationIncompletePayload(input.latestRun)
                         ?.reason === SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON
                       ? `The plugin that starts this agent's sandbox is not running. To fix it, ${sandboxProviderPluginRemedy(
@@ -4289,6 +4298,18 @@ export function recoveryService(
         return null;
       }
 
+      if (input.recoveryCause === "configuration_incomplete" && input.latestRun) {
+        const [restored] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, current.companyId),
+          eq(issueRecoveryActions.sourceIssueId, current.id),
+          eq(issueRecoveryActions.cause, "configuration_incomplete"),
+          eq(issueRecoveryActions.status, "resolved"),
+          eq(issueRecoveryActions.outcome, "restored"),
+          sql`${issueRecoveryActions.evidence}->>'latestRunId' = ${input.latestRun.id}`,
+        )).limit(1);
+        if (restored) return null;
+      }
+
       // Acceptance holds the same issue lock before writing its successor.
       // An awaiting-release handoff need not change the issue's version or
       // owner, and generic recovery must not cancel that durable successor.
@@ -4941,7 +4962,6 @@ export function recoveryService(
             if (current) Object.assign(issue, current);
           }
         }
-        if (!(await instanceSettingsService(db).getExperimental()).enableAgentChat) { result.skipped += 1; continue; }
         {
           if (await deliverConversationComments(db, issue, deps.enqueueWakeup,
             { onDeferredDeadline: opts?.onDeferredDeadline }) === "deferred") {
@@ -5112,6 +5132,28 @@ export function recoveryService(
         continue;
       }
 
+      // A Plan-mode task whose run settled before the server opened plan
+      // review cards on settle (or whose card opening was interrupted) gets
+      // its card here; the card is then its next action.
+      if (
+        issue.workMode === "planning" &&
+        issue.status === "in_progress" &&
+        latestRun?.status === "succeeded" &&
+        latestRun.agentId === agentId &&
+        // An accepted native plan waits for the user's next message; its
+        // answered plan question is the review. Never ask for it again.
+        parseObject(latestRun.resultJson).finalizationReasonCode !== "native_plan_accepted_waiting_for_continuation" &&
+        !(await hasCommittedNativePlanWait(db, {
+          companyId: issue.companyId, issueId: issue.id, runId: latestRun.id, agentId,
+        })) &&
+        (await ensureNativePlanReviewCard(db, {
+          companyId: issue.companyId, issueId: issue.id, runId: latestRun.id, agentId,
+        })).kind === "created"
+      ) {
+        result.skipped += 1;
+        result.issueIds.push(issue.id);
+        continue;
+      }
       if (
         await hasActiveExecutionPath(
           issue.companyId,
@@ -6907,6 +6949,17 @@ export function recoveryService(
       if (!taskClosed && [issue.checkoutRunId, issue.executionRunId]
         .some(runId => runId !== null && pendingResumeRunIds.has(runId))) {
         continue;
+      }
+      if (!taskClosed) {
+        let settlingUntil: Date | null = null;
+        for (const runId of new Set([issue.checkoutRunId, issue.executionRunId])) {
+          const lockRun = runId ? runById.get(runId) : undefined;
+          if (lockRun && !settlingUntil) settlingUntil = await terminalRunSettlingUntil(issue.companyId, lockRun.id, lockRun);
+        }
+        if (settlingUntil) {
+          opts?.onDeferredDeadline?.(settlingUntil.getTime());
+          continue;
+        }
       }
 
       await deps.beforeStaleLockClear?.(issue.id);

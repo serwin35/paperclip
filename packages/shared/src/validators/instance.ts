@@ -96,7 +96,10 @@ export const instanceExperimentalSettingsSchema = z.object({
   // always enabled; this remains accepted so older stored rows and managed
   // configs continue to load during upgrades.
   enableApps: z.boolean().default(true),
-  enablePublicMcp: z.boolean().default(false),
+  // Deprecated compatibility key. Assistant connections (MCP) graduated from
+  // Experimental and are always enabled; older stored rows, managed configs
+  // and clients may still send it.
+  enablePublicMcp: z.boolean().default(true),
   enableOpenAiDot: z.boolean().default(false),
   enableGrokBot: z.boolean().default(false),
   enableMuse: z.boolean().default(false),
@@ -107,6 +110,7 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableMemoryConnectors: z.boolean().default(false),
   enablePaperclipNotebook: z.boolean().default(false),
   enableGoogleWorkspaceConnector: z.boolean().default(false),
+  enableAwsConnector: z.boolean().default(false),
   enableCases: z.boolean().default(false),
   enableAgentChat: z.boolean().default(true),
   enableCombinedInboxTasks: z.boolean().default(false),
@@ -122,6 +126,7 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableBetaSkills: z.boolean().default(false),
   enableSummaries: z.boolean().default(false),
   enableStatusCards: z.boolean().default(false),
+  enableResponsibilities: z.boolean().default(false),
   enableDecisions: z.boolean().default(false),
   enableFastResponses: z.boolean().default(false),
   enableGoalsSidebarLink: z.boolean().default(false),

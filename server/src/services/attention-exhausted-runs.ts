@@ -33,10 +33,17 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       errorCode: heartbeatRuns.errorCode,
       // Preserve JSON types and issueId/taskId fallback semantics without
       // transferring prompts, transcripts, or the rest of the run context.
-      contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-        'issueId', ${heartbeatRuns.contextSnapshot} -> 'issueId',
-        'taskId', ${heartbeatRuns.contextSnapshot} -> 'taskId'
-      )`,
+      // Prefer the issue_id column: reading the snapshot detoasts the whole
+      // run context (tens of kB per run), which cost ~1.9 s per attention
+      // request across a few thousand exhausted runs. The snapshot is still
+      // read when the column is null, e.g. after the issue was deleted.
+      contextSnapshot: sql<Record<string, unknown>>`case
+        when ${heartbeatRuns.issueId} is not null then jsonb_build_object('issueId', ${heartbeatRuns.issueId}, 'taskId', null)
+        else jsonb_build_object(
+          'issueId', ${heartbeatRuns.contextSnapshot} -> 'issueId',
+          'taskId', ${heartbeatRuns.contextSnapshot} -> 'taskId'
+        )
+      end`,
       createdAt: heartbeatRuns.createdAt,
       updatedAt: heartbeatRuns.updatedAt,
       finishedAt: heartbeatRuns.finishedAt,

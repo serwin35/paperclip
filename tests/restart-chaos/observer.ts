@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { ChaosApiError, type ChaosApi } from "./api.js";
-import { ACTIVE_RUN_STATUSES, isStalledSample, STALL_LIMIT_MS } from "./grader.js";
+import { ACTIVE_RUN_STATUSES, creditedQueueWaits, creditedRunQueuedMs, isStalledSample, STALL_LIMIT_MS } from "./grader.js";
 import type { ChaosLab } from "./seed.js";
 import type { Timeline } from "./timeline.js";
 import type {
@@ -20,7 +20,7 @@ import { awaitingQuestionAnswer, collectQuestionArtifacts, questionStep } from "
 import { isSessionFault, rotateAgentSession } from "./session-faults.js";
 import { awaitingRewake, collectRewakeArtifacts, isRewakeWorkload, rewakeStep } from "./rewake.js";
 import { withLongTurn } from "./long-turn.js";
-import { collectStagingMixArtifacts, holdsRetry, stagingMixDefinition, stagingMixStep } from "./staging-mix.js";
+import { collectStagingMixArtifacts, followUpAfterEndRange, holdsRetry, stagingMixDefinition, stagingMixStep } from "./staging-mix.js";
 import { captureRemoteWorkspaceFiles, readRemoteWorkspaceFile } from "./remote-workspace-files.js";
 import { taskFaultSchedule } from "./scheduler.js";
 import { g1ChildTitle, g1Decision, workloadDefinitions, type WorkloadAgents } from "./workloads.js";
@@ -51,6 +51,11 @@ export async function listWorkspaceFiles(root: string): Promise<string[]> {
 }
 
 export const QUEUED_TRIGGER_MAX_EMPTY_SAMPLES = 3;
+
+export function bannerRestDue(since: number, now: number, raw = process.env.RESTART_CHAOS_MIX_BANNER_REST_SECONDS): boolean {
+  if (raw === undefined || raw === "" || !/^[0-9]+$/.test(raw)) return false;
+  return now - since >= Number(raw) * 1000;
+}
 
 function stillQueued(runs: readonly RunSample[]): boolean {
   return runs.some(run => run.status === "queued" && !run.startedAt) && !runs.some(run => run.startedAt || run.status === "running");
@@ -207,11 +212,13 @@ export class TaskObserver {
   readonly record: TaskRecord;
   issue: Json | null = null;
   private restCandidateSince: number | null = null;
+  private bannerSince: number | null = null;
   private childrenSettledAt: number | null = null;
   private childStallCheckedAt: number | null = null;
   private stallSince: number | null = null;
   /** First sample of the current stretch with the server ready (H1 holds the pause across it). */
   private readySince: number | null = null;
+  private readonly queueWaitsExtended = new Set<string>();
   private readonly faultSchedule: ScheduledFault[];
   private readonly pendingFaults: ScheduledFault[];
   done = false;
@@ -485,14 +492,28 @@ export class TaskObserver {
   /** Outages extend the deadline: R1 allows budget plus outage time. */
   extendDeadline(ms: number) { if (this.record.deadlineAt !== null) this.record.deadlineAt += ms; }
 
+  private extendForQueueWaits() {
+    for (const wait of creditedQueueWaits(this.record)) {
+      if (this.queueWaitsExtended.has(wait.runId)) continue;
+      this.queueWaitsExtended.add(wait.runId);
+      this.extendDeadline(wait.startedAt - wait.createdAt);
+    }
+  }
+
   async poll(now = Date.now()): Promise<void> {
     if (this.done || !this.record.issueId) return;
     const sample = await this.sample(now);
     this.record.samples.push(sample);
+    this.extendForQueueWaits();
     await this.captureRemoteFilesAtDone(sample);
     this.readySince = sample.reachable && sample.serverReady ? (this.readySince ?? now) : null;
     await this.observeBenchProgress();
+    const afterEndPosts = this.record.stagingMix?.afterEndFollowUps?.length ?? 0;
     await this.governanceStep(sample, now);
+    if ((this.record.stagingMix?.afterEndFollowUps?.length ?? 0) > afterEndPosts) {
+      this.restCandidateSince = null;
+      return;
+    }
     if (this.journey && await this.journey.step({ sample, now, pendingFaults: this.pendingFaults,
       quiet: sample.reachable && sample.serverReady && !this.supervisor.faultInProgress })) this.restCandidateSince = null;
     if (await this.observeChildStalls(now)) {
@@ -507,6 +528,10 @@ export class TaskObserver {
       // The comment response is not the agent's answer: require fresh samples.
       this.restCandidateSince = null;
       return;
+    }
+    if (isStalledSample(sample) && this.definition.collect.childDocuments && this.record.issueId) {
+      const children = await this.collectChildren(this.record.issueId).catch(() => null);
+      if (children?.length && childrenPending(children)) sample.waitingOnChildren = true;
     }
     // A task waiting on the board (G1's approval, H1's paused company) is in a named wait, not a stall.
     this.stallSince = isStalledSample(sample) && !this.awaitingBoard() ? (this.stallSince ?? now) : null;
@@ -527,7 +552,10 @@ export class TaskObserver {
         if (this.done) return;
       }
     }
-    if (this.record.deadlineAt !== null && now > this.record.deadlineAt && !this.supervisor.faultInProgress) {
+    const queuedMs = Math.min(creditedRunQueuedMs(this.record, now), this.definition.budgetMs);
+    if (this.record.deadlineAt !== null && now > this.record.deadlineAt + queuedMs && !this.supervisor.faultInProgress) {
+      if (this.restCandidateSince !== null && this.restCandidateSince <= this.record.deadlineAt
+        && now - this.restCandidateSince < REST_CONFIRM_MS) return;
       this.record.timedOut = true;
       this.record.finalStatus = sample.issueStatus ?? this.record.finalStatus;
       this.done = true;
@@ -540,8 +568,10 @@ export class TaskObserver {
   private async runEvidence(run: RunSample): Promise<RunSample> {
     if (run.status !== "running") return run;
     const cursor = this.runEventCursors.get(run.id) ?? { seq: 0, lastAt: null, openTools: 0, process: null };
+    let eventsRead = false;
     for (let page = 0; page < 3; page += 1) {
       const events = await this.api.get<Json[]>(`/api/heartbeat-runs/${run.id}/events?afterSeq=${cursor.seq}&limit=${RUN_EVENT_PAGE}`, 5_000).catch(() => null);
+      if (Array.isArray(events)) eventsRead = true;
       if (!events?.length) break;
       for (const event of events) {
         if (typeof event.seq === "number" && event.seq > cursor.seq) cursor.seq = event.seq;
@@ -556,6 +586,7 @@ export class TaskObserver {
     }
     this.runEventCursors.set(run.id, cursor);
     return { ...run, lastEvidenceAt: latestIso([run.lastEvidenceAt, cursor.lastAt]),
+      ...(eventsRead && cursor.seq === 0 ? { preparing: true } : {}),
       ...(cursor.openTools > 0 ? { toolInFlight: true } : {}),
       ...(cursor.turnActive ? { providerTurnActive: true } : {}),
       ...(cursor.process && this.processAlive(cursor.process.pid, cursor.process.startedAt) ? { processAlive: true } : {}) };
@@ -688,8 +719,13 @@ export class TaskObserver {
     if (status !== "done" && (!this.record.retry || faultSinceRetry) && sample.interruption?.canRetry) {
       if (this.plan.stagingMix?.retryDuringWave && holdsRetry(this.record, this.plan.stagingMix.holdMs, now)) { this.restCandidateSince = null; return; }
       if (!this.plan.stagingMix || this.plan.stagingMix.retryDuringWave) { await this.boardRetry(sample, now); return; }
-      this.restCandidateSince = null;
-      return;
+      this.bannerSince ??= now;
+      if (!bannerRestDue(this.bannerSince, now)) {
+        this.restCandidateSince = null;
+        return;
+      }
+    } else {
+      this.bannerSince = null;
     }
     this.record.restAt = this.restCandidateSince ?? now;
     this.record.finalStatus = status;
@@ -859,6 +895,9 @@ export class TaskObserver {
     if (this.plan.workload === "H1") return Boolean(governance?.budgetPausedAt) && !governance?.resume && !governance?.pauseLostAt;
     if (this.plan.workload === "Q1" || this.plan.workload === "Q4") return awaitingQuestionAnswer(this.record);
     if (isRewakeWorkload(this.plan.workload)) return awaitingRewake(this.record);
+    const afterEnd = followUpAfterEndRange();
+    if (afterEnd && this.plan.stagingMix?.followUpAfterMs != null) return (this.record.stagingMix?.afterEndFollowUps?.length ?? 0) < afterEnd.count;
+    if (this.plan.stagingMix?.followUpAfterMs != null && !this.record.stagingMix?.followUp) return true;
     return false;
   }
 

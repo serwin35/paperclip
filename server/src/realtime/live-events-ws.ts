@@ -11,7 +11,8 @@ import { agentApiKeys, companyMemberships, instanceUserRoles, heartbeatRuns, iss
 import { issueActivityChangesTaskIdentity, type DeploymentMode, type LiveEvent } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
-import { activityToastIdentity } from "./activity-toast-identity.js";
+import { createActivityToastIdentity } from "./activity-toast-identity.js";
+import { recentSubtaskParents } from "./recent-subtask-parents.js";
 import { taskToastEligible } from "./task-toast-eligibility.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
@@ -57,7 +58,8 @@ import { canActorReadCase } from "../services/case-access.js";
 interface ReadableIssue {
   id: string;
   identifier: string | null;
-  title: string;
+  /** Already passed upstream's notification redaction; null when it was withheld. */
+  title: string | null;
 }
 
 // Scalar change fields an issue toast and its query invalidation read. Other
@@ -80,9 +82,9 @@ function isScalar(value: unknown) {
 // viewer was just authorized to read, never from the event details.
 function issueActivityToastFields(payload: Record<string, unknown>, issue: ReadableIssue) {
   const details = asRecord(payload.details) ?? {};
-  const visible: Record<string, unknown> = { issueTitle: issue.title };
+  const visible: Record<string, unknown> = issue.title ? { issueTitle: issue.title } : {};
   if (issue.identifier) visible.identifier = issue.identifier;
-  if (typeof details.title === "string") visible.title = issue.title;
+  if (typeof details.title === "string" && issue.title) visible.title = issue.title;
   for (const key of ISSUE_ACTIVITY_DETAIL_KEYS) {
     if (isScalar(details[key])) visible[key] = details[key];
   }
@@ -300,6 +302,7 @@ export function setupLiveEventsWebSocketServer(
 ) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const redactRunEvent = createLiveRunEventRedactor(db);
+  const readActivityIdentity = createActivityToastIdentity(db);
   const cleanupByClient = new Map<WsSocket, () => void>();
   const aliveByClient = new Map<WsSocket, boolean>();
 
@@ -327,9 +330,21 @@ export function setupLiveEventsWebSocketServer(
         || !(await canActorReadCase(db, context!.actor, { id: event.payload.entityId, companyId: event.companyId })))) return null;
       if (context!.actor.source === "local_implicit") {
         if (event.type === "activity.logged" && event.payload.entityType === "issue") {
+          const identity = await readActivityIdentity(event);
+          const details = event.payload.details && typeof event.payload.details === "object" && !Array.isArray(event.payload.details)
+            ? event.payload.details as Record<string, unknown> : {};
           return { ...event, payload: { ...event.payload,
+            ...(event.payload.action === "issue.comment_added" ? { details: { ...details,
+              changes: undefined,
+              issueTitle: "issueTitle" in identity ? identity.issueTitle : undefined,
+              bodySnippet: "notificationDetails" in identity ? identity.notificationDetails?.bodySnippet : undefined } } : {}),
             taskIdentityChanged: issueActivityChangesTaskIdentity(event.payload.action, event.payload.details),
-            ...await activityToastIdentity(db, event.companyId, event.payload) } };
+            ...identity,
+            ...await recentSubtaskParents(db, context!.actor, event.companyId, event.payload, reads) } };
+        }
+        if (event.type === "heartbeat.run.status" || event.type === "heartbeat.run.queued") {
+          return { ...event, payload: { ...event.payload,
+            ...await recentSubtaskParents(db, context!.actor, event.companyId, event.payload, reads) } };
         }
         return event;
       }
@@ -352,13 +367,14 @@ export function setupLiveEventsWebSocketServer(
         : payload.entityType === "issue" && typeof payload.entityId === "string" ? payload.entityId : null;
       const runId = typeof payload.runId === "string" ? payload.runId
         : payload.entityType === "heartbeat_run" && typeof payload.entityId === "string" ? payload.entityId : null;
-      if (event.type === "heartbeat.run.event" || event.type === "heartbeat.run.log") {
+      if (event.type === "heartbeat.run.event" || event.type === "heartbeat.run.log" || event.type === "heartbeat.run.tool_progress") {
         const allowed = await sharedDeliveryRead(reads, "transcript-scope", async () => (await access.decide({
           actor: context!.actor, action: "company_scope:read",
           resource: { type: "company", companyId: event.companyId } })).allowed);
         if (!allowed) return null;
       }
       const readBindings: Parameters<typeof getHeartbeatRunReadDecisions>[3][number][] = [];
+      let navigationTask: { id: string; parentId: string | null } | undefined;
       if (issueId) {
         readBindings.push({ companyId: event.companyId, scopeKind: "issue", issueId });
       }
@@ -367,9 +383,13 @@ export function setupLiveEventsWebSocketServer(
           companyId: heartbeatRuns.companyId,
           scopeKind: heartbeatRuns.scopeKind,
           issueId: heartbeatRuns.issueId,
-        }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId))))[0]);
+          // Reuse this narrow binding for navigation hints after authorization.
+          parentId: issues.parentId,
+        }).from(heartbeatRuns).leftJoin(issues, and(eq(issues.id, heartbeatRuns.issueId), eq(issues.companyId, heartbeatRuns.companyId)))
+          .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, event.companyId))))[0]);
         if (!run) return null;
         readBindings.push(run);
+        if (run.issueId) navigationTask = { id: run.issueId, parentId: run.parentId };
       }
       if (!(await sharedDeliveryRead(reads, `read:${issueId ?? ""}:${runId ?? ""}`, async () =>
         (await getHeartbeatRunReadDecisions(db, access, context!.actor, readBindings)).every(Boolean)))) return null;
@@ -386,7 +406,12 @@ export function setupLiveEventsWebSocketServer(
         if (!project || !(await access.decide({ actor: context!.actor, action: "project:read",
           resource: { type: "project", companyId: event.companyId, projectId: project.id } })).allowed) return null;
       }
-      if (event.type.startsWith("heartbeat.run.")) return runId ? event : null;
+      if (event.type.startsWith("heartbeat.run.")) {
+        if (!runId) return null;
+        return event.type === "heartbeat.run.status" || event.type === "heartbeat.run.queued"
+          ? { ...event, payload: { ...event.payload, ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads, navigationTask) } }
+          : event;
+      }
       if (event.type === "agent.session.goal.changed") return issueId ? event : null;
       // Fork: the toast label of activity on a task, read only after the batched
       // check above let this viewer read that task.
@@ -399,6 +424,9 @@ export function setupLiveEventsWebSocketServer(
       // Company-wide invalidations carry no task-derived content. Authorized
       // clients obtain details through viewer-filtered HTTP reads. Activity on a
       // task this viewer may read also keeps what its toast needs.
+      // Fork: one identity read feeds both upstream's fields and the toast label, so the
+      // label uses the title upstream redacted for notifications, never the raw row.
+      const activityIdentity = event.type === "activity.logged" && issueId ? await readActivityIdentity(event) : {};
       if (event.type === "activity.logged") return { ...event, payload: {
         action: payload.action, entityType: payload.entityType, entityId: payload.entityId,
         // A handoff can attach the first case to a task. Its already-authorized
@@ -410,13 +438,19 @@ export function setupLiveEventsWebSocketServer(
           ? { taskIdentityChanged: issueActivityChangesTaskIdentity(payload.action, payload.details) }
           : {}),
         // The task read check above authorizes attribution, but not arbitrary details.
-        ...(issueId ? await activityToastIdentity(db, event.companyId, payload) : {}),
+        ...activityIdentity,
         // Fork: the readable task's identifier, title and allowlisted change fields for the toast label.
-        ...(readableIssue ? issueActivityToastFields(payload, readableIssue) : {}),
+        ...(readableIssue ? issueActivityToastFields(payload, {
+          ...readableIssue,
+          title: "issueTitle" in activityIdentity && typeof activityIdentity.issueTitle === "string" ? activityIdentity.issueTitle : null,
+        }) : {}),
+        ...await recentSubtaskParents(db, context!.actor, event.companyId, payload, reads),
       } };
       if (event.type === "agent.status") return { ...event, payload: { agentId: payload.agentId, status: payload.status } };
       if (event.type === "agent.runtime_state.updated") return { ...event, payload: { agentId: payload.agentId } };
       if (event.type === "external_object.updated") return { ...event, payload: { externalObjectId: payload.externalObjectId } };
+      // Only the id: reading the checklist itself goes through the board-only API.
+      if (event.type === "agent_setup_progress.updated") return { ...event, payload: { progressId: payload.progressId } };
       if (event.type.startsWith("plugin.")) return event;
       return null;
     }

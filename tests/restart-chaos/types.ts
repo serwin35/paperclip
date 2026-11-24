@@ -271,6 +271,7 @@ export interface RunSample {
   processAlive?: boolean;
   /** A provider turn started and has no turn terminal yet. */
   providerTurnActive?: boolean;
+  preparing?: boolean;
 }
 
 export interface InterruptionSample {
@@ -294,6 +295,7 @@ export interface TaskSample {
   recoveryOwner?: string | null;
   executionBlocker?: boolean;
   scheduledRetry?: boolean;
+  waitingOnChildren?: boolean;
   runs?: RunSample[];
 }
 
@@ -438,6 +440,8 @@ export interface RestSweep {
   error: string | null;
 }
 
+export interface RunWake { wakeReason: string | null; continuesRunIds: string[] }
+
 export interface TaskRecord {
   plan: TaskPlan;
   issueId: string | null;
@@ -461,6 +465,7 @@ export interface TaskRecord {
   restSnapshotError?: string;
   priorRetries?: RetryAttempt[];
   childStalls?: Array<{ childIssueId: string; recoveryActionId: string | null }>;
+  runWakes?: Record<string, RunWake>;
   childRetries?: Array<RetryAttempt & { childIssueId: string }>;
   workspaceMovedTo?: string;
   /** Set when the pre-fault snapshot could not read the workspace; R2 then fails visibly. */

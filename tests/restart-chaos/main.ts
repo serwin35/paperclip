@@ -27,9 +27,11 @@ import { DiskFullFaultSeam, isDiskFullFault, receiptsForIssue, withDiskFullCheck
 import { CREDENTIAL_FOR_ADAPTER, parseCommand, replayCommand, waveIdFor } from "./config.js";
 import { assertControllerMatchesImage, assertProviderPackMismatch, defaultDaytonaImageCacheRoot, prepareDaytonaImageArtifacts } from "./daytona-image.js";
 import { PLUGIN_BUILD_STAMP, pluginBuildState } from "./plugin-build.js";
+import { finishDaytonaCleanup } from "./daytona-cleanup.js";
 import { DaytonaWaveSweeper, leaksForTask, unattributedLeaks, type DaytonaSweepResult } from "./daytona-sweep.js";
 import { knownSecretValues, redactKnownSecrets, wakeEvidenceOnce, writeEvidenceBundle } from "./evidence.js";
 import { gradeTask } from "./grader.js";
+import { loadWaveGradeInputs } from "./wave-grade-inputs.js";
 import { releaseInstance } from "../runner-e2e/instance-retention.js";
 import { checkPlanInvariants, readUniversalDbEvidence, summarizeViolations, type InvariantCheck } from "./invariants.js";
 import { collectContentionEvidence, RunRowPressure } from "./contention.js";
@@ -42,7 +44,7 @@ import { matrixMayLaunch, planMatrixWave } from "./journey-matrix.js";
 import { redeployWave } from "./redeploy.js";
 import { withT1CrossingCheck } from "./workloads.js";
 import { parseRecoveryStepReceipts, withRecoveryStepCheck } from "./recovery-step-faults.js";
-import { captureWaveRunnerLogs, executeInWaveSandboxes } from "./daytona-runner-logs.js";
+import { captureWaveRunnerLogs, executeInWaveSandboxes, RUNNER_LOG_CAPTURE_DEADLINE_MS } from "./daytona-runner-logs.js";
 import { isClassRFault, killedPidsFromOutput, providerKillCommand, watchLabels, withClassRCheck, type ProviderKillRecord } from "./class-r.js";
 import { TASK_FAULT_LOG, observedFaultSchedule, planWave, replayOnCurrentBuild, replayRecordFor, replayWave, type TaskFaultLog } from "./scheduler.js";
 import { chaosLifecycleOverrides, seedChaosLab } from "./seed.js";
@@ -57,7 +59,7 @@ import { guardedRunnerOutputs, worktreeFingerprint } from "./wave-guard.js";
 import { checkCrossServer, readCrossServerEvidence } from "./multi-server.js";
 import { ReleaseSwapWave, stormRunFor } from "./release-swap-setup.js";
 import { runnerBindFaultServerEnvironment, sessionFaultServerEnvironment } from "./session-faults.js";
-import { controllerLogNames, gradeWarmShutdown, isWarmWave, warmShutdownMarkdown, type WarmShutdownCleanup } from "./warm-shutdown.js";
+import { controllerLogNames, gradeWarmShutdown, isWarmWave, waitBounded, warmShutdownMarkdown, watchFirstIdleCloseFailure, type WarmShutdownCleanup } from "./warm-shutdown.js";
 import type { FaultKind, FaultReceipt, OracleArtifacts, TriggerId, WavePlan } from "./types.js";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
@@ -140,7 +142,7 @@ async function prepareDaytona(plan: WavePlan, timeline: Timeline): Promise<Recor
   const image = plan.options.daytonaImage!;
   const artifacts = await prepareDaytonaImageArtifacts({ image, cacheRoot: defaultDaytonaImageCacheRoot(),
     log: line => console.info(`[daytona-image] ${line}`) });
-  const { localContentId } = await assertControllerMatchesImage(artifacts, repositoryRoot);
+  const { localContentId } = await assertControllerMatchesImage(artifacts, plan.options.serverFrom ?? repositoryRoot);
   timeline.add("daytona_image_matched", { image, contentId: artifacts.contentId, localContentId, sourceRevision: artifacts.sourceRevision,
     runnerdSha256: artifacts.runnerdSha256, providerPackDigest: artifacts.providerPackDigest, platformManifestDigest: artifacts.platformManifestDigest });
   ensureDaytonaPlugin(timeline);
@@ -266,6 +268,11 @@ async function main(): Promise<number> {
     supervisor.useCrashPointControl({ controlPath: path.join(supervisor.paths.temporaryRoot, "crash-point.control"),
       receiptPath: path.join(waveDir, "crash-point-receipts.jsonl") });
   }
+  const externalCrashControl = process.env.RESTART_CHAOS_EXTERNAL_CRASH_CONTROL;
+  if (!crashPoint && !plan.options.failRecoveryStep && externalCrashControl) {
+    supervisor.useCrashPointControl({ controlPath: externalCrashControl,
+      receiptPath: process.env.RESTART_CHAOS_EXTERNAL_CRASH_RECEIPT ?? path.join(waveDir, "crash-point-receipts.jsonl") });
+  }
   let sweeper: DaytonaWaveSweeper | null = null;
   let sandboxSweep: DaytonaSweepResult | null = null;
   let runnerLogTarget: { companyId: string; environmentId: string } | null = null;
@@ -311,6 +318,12 @@ async function main(): Promise<number> {
   let storageSection: string | null = null;
   let warmShutdownSection: string | null = null;
   let daytonaCleanup: WarmShutdownCleanup | null = null;
+  let idleCloseCapture: Promise<void> | null = null;
+  const idleCloseCaptures: string[] = [];
+  const waitForIdleCloseCapture = async (phase: string) => {
+    const outcome = await waitBounded(() => idleCloseCapture, RUNNER_LOG_CAPTURE_DEADLINE_MS + 5_000);
+    if (outcome === "timed_out") timeline.add("idle_close_failure_capture_wait_timed_out", { phase });
+  };
   let harnessError: unknown;
   process.on("uncaughtException", error => {
     if (isSocketTypeOfServiceRace(error)) { timeline.add("harness_socket_race_ignored", { error: String(error) }); return; }
@@ -454,6 +467,12 @@ async function main(): Promise<number> {
         if (sandboxEvidence) {
           runnerLogTarget = { companyId: owned.companyId, environmentId: owned.environmentId };
           if (redeployWave(plan)) supervisor.redeployEvidence = (faultId, phase) => captureRunnerLogs(`${faultId}-${phase}`);
+          if (isWarmWave(plan.options)) supervisor.onServerOutput = watchFirstIdleCloseFailure(failure => {
+            const label = `idle-close-failure-${(failure.runId ?? "unknown").slice(0, 8)}`;
+            idleCloseCaptures.push(label);
+            timeline.add("idle_close_failure_seen", { runId: failure.runId, label, line: failure.line.slice(0, 2_000) });
+            idleCloseCapture = captureRunnerLogs(label).catch(error => { timeline.add("idle_close_failure_capture_failed", { label, error: String(error) }); });
+          });
           // `--sandbox-watch-seconds`: capture on a clock too, for Runner exits that no fault announces (W2 re-wake).
           if (plan.options.sandboxWatchMs) faultWork.push(watchSandboxes(plan.options.sandboxWatchMs));
         }
@@ -784,6 +803,7 @@ async function main(): Promise<number> {
     const universalByIssue = await readUniversalDbEvidence(evidenceDb, lab.companyId).catch(error => {
       timeline.add("universal_db_evidence_failed", { error: String(error) }); return null; });
     const allRunMessages = new Map([...(universalByIssue?.values() ?? [])].flatMap(entry => [...entry.runMessages]));
+    const gradeInputs = await loadWaveGradeInputs(waveDir, plan.options.stagingMix);
     const costSummary = launched.some(observer => observer.plan.workload === "L1")
       ? await api.get<Record<string, unknown>>(`/api/companies/${lab.companyId}/costs/summary?period=all`)
         .then(summary => typeof summary.spendCents === "number"
@@ -822,8 +842,9 @@ async function main(): Promise<number> {
         observer.record.faultIds, parseRecoveryStepReceipts(await readFile(recoveryStepReceipts, "utf8").catch(() => "")), artifacts?.runs ?? []);
       // CR1–CR3: the task's own fault applied (CR2 killed a provider, CR3 stalled the plugin worker; class-r.ts).
       const toolOracle = withClassRCheck(stepOracle, observer.plan, faults);
+      Object.assign(observer.record, await gradeInputs.prepare(observer.plan.taskId, observer.record));
       const grade = gradeTask(observer.record, faults, observer.definition.budgetMs, toolOracle, universalByIssue ? {
-        runMessages: allRunMessages, recoveryActions: universalByIssue.get(observer.record.issueId ?? "")?.recoveryActions ?? [] } : undefined);
+        runMessages: allRunMessages, recoveryActions: universalByIssue.get(observer.record.issueId ?? "")?.recoveryActions ?? [] } : undefined, gradeInputs.queue);
       let evidence: string | null = null;
       if (!grade.pass) {
         anyFailure = true;
@@ -910,32 +931,15 @@ async function main(): Promise<number> {
     if (supervisor.serverReady) await recordWaveSpend().catch(() => undefined);
     await board?.close().catch(() => undefined);
     await closeJourneyApps();
+    await waitForIdleCloseCapture("before_cleanup");
     try { if (sweeper) try {
-      const owned = sweeper as DaytonaWaveSweeper;
-      // An interrupted wave still reports what it leaked before cleanup.
-      sandboxSweep ??= await owned.sweep(0);
-      // Cleanup only through Paperclip; the harness never changes a sandbox.
-      const cleanup = await owned.cleanUp();
-      daytonaCleanup = cleanup;
-      timeline.add("daytona_cleanup", cleanup);
-      console.info(`Daytona R6 sweep: ${sandboxSweep.liveSandboxes.length} live, ${sandboxSweep.archivedSandboxes.length} archived after release, `
-        + `${sandboxSweep.orphanSandboxes.length} orphaned, `
-        + `${sandboxSweep.heldLeases.length} held leases${sandboxSweep.error ? `, error ${sandboxSweep.error}` : ""}; `
-        + `environment deleted: ${cleanup.environmentDeleted}${cleanup.environmentDeleteBlocked ? " (still blocked by a pending sandbox cleanup)" : ""}; still running after cleanup: ${cleanup.remainingSandboxes.join(", ") || "none"}`);
-      // A sandbox neither archived nor destroyed after cleanup is a leak for a person to act on.
-      if (cleanup.remainingSandboxes.length) { anyFailure = true; remoteCleanupPending = true; }
-      // A delete still blocked by pending sandbox cleanup after the settle window
-      // is a leak, not a harness error: fail the wave and keep the instance, whose
-      // database owns that cleanup work.
-      if (cleanup.environmentDeleteBlocked) {
-        anyFailure = true;
-        remoteCleanupPending = true;
-        timeline.add("daytona_environment_delete_blocked", { detail: cleanup.environmentDeleteBlocked });
-      }
-      if (cleanup.errors.length) remoteCleanupPending = true;
-      if (cleanup.errors.length) harnessError ??= new Error(`Daytona cleanup incomplete: ${cleanup.errors.join("; ")}`);
-      await writeFile(path.join(waveDir, "sandbox-sweep.json"), `${JSON.stringify({ sweep: sandboxSweep, cleanup }, null, 2)}\n`, { mode: 0o600 })
-        .catch(error => timeline.add("sandbox_sweep_write_failed", { error: String(error) }));
+      const outcome = await finishDaytonaCleanup({ sweeper: sweeper as DaytonaWaveSweeper, sweep: sandboxSweep, waveDir, timeline,
+        beforeSandboxDelete: () => waitForIdleCloseCapture("before_sandbox_delete") });
+      sandboxSweep = outcome.sweep;
+      daytonaCleanup = outcome.cleanup;
+      if (outcome.failed) anyFailure = true;
+      if (outcome.remotePending) remoteCleanupPending = true;
+      if (outcome.error) harnessError ??= outcome.error;
     } catch (error) {
       harnessError ??= error;
       remoteCleanupPending = true;
@@ -952,7 +956,8 @@ async function main(): Promise<number> {
       const logDir = path.dirname(supervisor.paths.serverLogPath);
       const controllerLogs = controllerLogNames(await readdir(logDir).catch(() => [] as string[]));
       const serverLog = (await Promise.all(controllerLogs.map(name => readFile(path.join(logDir, name), "utf8").catch(() => "")))).join("\n");
-      const warmShutdown = gradeWarmShutdown({ cleanup: daytonaCleanup, serverLog });
+      await waitForIdleCloseCapture("before_grade");
+      const warmShutdown = gradeWarmShutdown({ cleanup: daytonaCleanup, serverLog, sandboxCaptures: idleCloseCaptures });
       timeline.add("warm_shutdown", { ...warmShutdown });
       if (warmShutdown.verdict === "fail") anyFailure = true;
       warmShutdownSection = warmShutdownMarkdown(warmShutdown);

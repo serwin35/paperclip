@@ -1,4 +1,5 @@
 import { sameRunResumeClaimEntry } from "./scheduled-resume-continuation.js";
+import { liveNativeFinalizationReserved } from "./live-native-finalization.js";
 import { appendBoundedRecoveryHistory } from "./native-restart-recovery.js";
 import { notifyLiveRunRecovery } from "../live-run-recovery-notifications.js";
 import { currentControllerProcessStamp } from "../controller-process-identity.js";
@@ -158,6 +159,7 @@ export async function claimNativeSessionResumptions(input: {
     let terminalRunToEmit: typeof heartbeatRuns.$inferSelect | null = null;
     let claimFailed = false;
     let claimedAttempt = 0;
+    let leaseLiveByDatabaseClock = false;
     const claimed = await input.db.transaction(async (tx) => {
       await tx.execute(sql`select set_config('statement_timeout', '10000', true), set_config('lock_timeout', '2000', true)`);
       const [issue] = await tx.select().from(issues).where(and(
@@ -331,8 +333,13 @@ export async function claimNativeSessionResumptions(input: {
       }).where(and(
         eq(nativeRunFinalizations.runId, row.run.id),
         eq(nativeRunFinalizations.phase, row.coordinator.phase),
+        or(isNull(nativeRunFinalizations.leaseOwner), isNull(nativeRunFinalizations.leaseExpiresAt),
+          sql`${nativeRunFinalizations.leaseExpiresAt} <= clock_timestamp()`),
       )).returning({ runId: nativeRunFinalizations.runId }).then((rows) => rows[0] ?? null);
-      if (!updated) return false;
+      if (!updated) {
+        leaseLiveByDatabaseClock = true;
+        return false;
+      }
       claimedAttempt = row.coordinator.attempt;
       await tx.update(heartbeatRuns).set({
         status: "running",
@@ -360,7 +367,7 @@ export async function claimNativeSessionResumptions(input: {
       void reportRunFailure(input.db, terminalRunToEmit);
     }
     if (claimed) claims.push({ runId: candidate.runId, leaseOwner, attempt: claimedAttempt });
-    else if (claimFailed || input.deferIneligible !== false) await input.db.transaction(async tx => {
+    else if (!leaseLiveByDatabaseClock && (claimFailed || input.deferIneligible !== false)) await input.db.transaction(async tx => {
       await tx.execute(sql`select set_config('statement_timeout', '10000', true), set_config('lock_timeout', '2000', true)`);
       await notifyLiveRunRecovery(tx, { companyId: candidate.companyId, runId: candidate.runId });
       await tx.update(nativeRunFinalizations).set({
@@ -686,6 +693,8 @@ async function reconcileNativeFinalizationsPass(
       const { operation } = outcome;
       const workspaceFinalizeStatus = "succeeded" as const;
       if (options.skipNativeResultCommit && row.coordinatorPhase !== "committed") continue;
+      // The run's live heartbeat commits it; its release wakes the result worker.
+      if (row.coordinatorPhase !== "committed" && liveNativeFinalizationReserved(row.runId)) continue;
       try {
         const finalized = await finalizeNativeRun({
           db,
@@ -743,6 +752,8 @@ async function reconcileNativeFinalizationsPass(
       continue;
     }
     if (options.skipNativeResultCommit && row.coordinatorPhase !== "committed") continue;
+    // The run's live heartbeat commits it; its release wakes the result worker.
+    if (row.coordinatorPhase !== "committed" && liveNativeFinalizationReserved(row.runId)) continue;
     const replayDecision = resolveNativeReconciliationStatus({
       facts: { canonicalReplay: true },
       priorIssueStatus: row.issueStatus as NativeAuthoritativeIssueStatus,

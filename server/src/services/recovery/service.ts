@@ -1,4 +1,6 @@
 import { wakeWaitersOfStalledIssues, type BlockerStallWakeup } from "./blocker-stall-wakeups.js";
+import { ANTIGRAVITY_SWARM_UNAVAILABLE } from "../antigravity-swarm-refusal.js";
+import { DEPENDENCY_WAKE_REPEATED_FAILURE_STREAK, readDependencyWakeCircuit } from "./dependency-wake-circuit-breaker.js";
 import { INTERACTION_DELIVERY_DENIED, isInteractionDeliveryDeniedRun } from "../agent-interaction-delivery.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
 import { OWNER_UNPROVABLE_CAUSE } from "./owner-gone-attestation.js";
@@ -619,6 +621,8 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
 
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
   INTERACTION_DELIVERY_DENIED,
+  // A refused /swarm waits for the user; every automatic attempt would refuse again.
+  ANTIGRAVITY_SWARM_UNAVAILABLE,
   "project_access_denied",
   "native_provider_model_rejected",
   "provider_tool_definition_invalid",
@@ -6201,6 +6205,7 @@ export function recoveryService(
       healed: 0,
       existingWakeSkipped: 0,
       selfBlockedSkipped: 0,
+      failedWakeBackoffSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
@@ -6209,6 +6214,7 @@ export function recoveryService(
       deferredOrFailed: 0,
       enqueueFailed: 0,
       issueIds: [] as string[],
+      repeatedFailureIssueIds: [] as string[],
     };
 
     const source = opts?.source ?? "issue_graph_liveness.backstop";
@@ -6402,6 +6408,24 @@ export function recoveryService(
           continue;
         }
 
+        // A woken run that fails can leave the task blocked again, which starts a
+        // new blocked cycle and a new idempotency key. Without this breaker a
+        // deterministic failure re-woke the task on every sweep, forever.
+        const circuit = await readDependencyWakeCircuit(db, {
+          companyId,
+          issueId: candidate.id,
+          agentId,
+          blockerIssueIds: readiness.blockerIssueIds,
+        });
+        if (circuit.state === "backoff") {
+          result.failedWakeBackoffSkipped += 1;
+          if (circuit.consecutiveFailures >= DEPENDENCY_WAKE_REPEATED_FAILURE_STREAK) {
+            result.repeatedFailureIssueIds.push(candidate.id);
+          }
+          opts?.onDeferredDeadline?.(circuit.retryAt);
+          continue;
+        }
+
         try {
           const wake = await deps.enqueueWakeup(agentId, {
             source: "automation",
@@ -6473,6 +6497,15 @@ export function recoveryService(
           blockerIssueId: opts?.blockerIssueId ?? null,
         },
         "issue graph liveness backstop healed resolved blocked dependency wakes",
+      );
+    }
+    if (result.repeatedFailureIssueIds.length > 0) {
+      logger.warn(
+        {
+          issueIds: result.repeatedFailureIssueIds,
+          source,
+        },
+        "issue graph liveness backstop is backing off blocked tasks whose resolved-dependency runs keep failing",
       );
     }
 

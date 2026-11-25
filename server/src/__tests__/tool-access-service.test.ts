@@ -15366,7 +15366,7 @@ describeEmbeddedPostgres("tool access service", () => {
     const tokenRequests: Array<{ url: string; clientId: string | null; clientSecret: string | null }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const href = String(url);
-      if (href === "https://slack.com/api/oauth.v2.access") {
+      if (href === "https://slack.com/api/oauth.v2.user.access") {
         const body = new URLSearchParams(String(init?.body ?? ""));
         tokenRequests.push({ url: href, clientId: body.get("client_id"), clientSecret: body.get("client_secret") });
         return { ok: true, status: 200, json: async () => ({ access_token: "deployment-access", refresh_token: "deployment-refresh", expires_in: 3600 }) } as Response;
@@ -15385,7 +15385,7 @@ describeEmbeddedPostgres("tool access service", () => {
       redirectUri: "https://paperclip.example/api/tools/oauth/callback",
       actor: { actorType: "user", actorId: userId },
     });
-    expect(tokenRequests).toEqual([{ url: "https://slack.com/api/oauth.v2.access", clientId: "slack-deployment-id", clientSecret: "slack-deployment-secret" }]);
+    expect(tokenRequests).toEqual([{ url: "https://slack.com/api/oauth.v2.user.access", clientId: "slack-deployment-id", clientSecret: "slack-deployment-secret" }]);
   });
 
   it("never sends a deployment OAuth client to a machine-to-machine token endpoint of a custom server", async () => {

@@ -64,6 +64,7 @@ wczytuje ten plik). Zmieniasz termin → zmień go tutaj i w istniejących wpisa
 | worktree (git) | drzewo robocze | |
 | target (binding) | obiekt docelowy | nie „cel” (to goal) |
 | harness | silnik | Claude Code / Codex / Cursor jako środowisko agenta |
+| swarm (Google Antigravity) | rój | polecenie `/swarm` zostaje bez tłumaczenia; helpers → pomocnicy |
 | Chief of staff | Chief of staff | domyślna nazwa pierwszego agenta; zostaje po angielsku jak w danych |
 | Previous / Next | Wstecz / Dalej | |
 

@@ -93,6 +93,35 @@ describe("claude_local failure classification precedence", () => {
     expect(result.errorCode).toBe("max_turns_exhausted");
   });
 
+  // The CLI result event Claude Code returns for an exhausted account limit. Its
+  // api_error_type is rate_limit_error, which the transient detector also matches.
+  it.each([
+    ["You've hit your 5-hour limit · resets 3am (Europe/Warsaw)", "2026-11-28T02:00:00.000Z"],
+    ["You've hit your weekly limit · resets Dec 2 at 7pm (Europe/Warsaw)", "2026-12-02T18:00:00.000Z"],
+  ])("waits for the provider reset on %s", async (message, retryNotBefore) => {
+    vi.useFakeTimers({ now: new Date("2026-11-27T22:38:00.000Z"), toFake: ["Date"] });
+    try {
+      mockExecutionResult(buildProcResult({
+        is_error: true,
+        subtype: "success",
+        result: message,
+        api_error: "usage_limit_reached",
+        api_error_type: "rate_limit_error",
+      }));
+
+      const result = await execute(buildContext() as never);
+
+      expect(result).toMatchObject({
+        errorCode: "provider_quota",
+        errorFamily: "provider_quota",
+        errorMessage: `Claude run failed: subtype=success: ${message}`,
+        resultJson: { errorFamily: "provider_quota", retryNotBefore, providerQuotaRetryNotBefore: retryNotBefore },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still reports model_not_found when the provider returns it", async () => {
     mockExecutionResult(
       buildProcResult({ is_error: true, subtype: "error", result: "API Error: 404 model not found" }),

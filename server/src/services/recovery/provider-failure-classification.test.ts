@@ -211,6 +211,21 @@ describe("classifyAdapterFailureForRecovery", () => {
     });
   });
 
+  it("classifies Claude's 5-hour limit wording and waits for the next clock-only reset", () => {
+    // Recorded on the run at 23:38 Warsaw time; the reset is 03:00 the same night.
+    const classification = classifyAdapterFailureForRecovery({
+      errorCode: "adapter_failed",
+      error: "ACP agent reported a terminal limit failure.\nYou've hit your 5-hour limit · resets 3am (Europe/Warsaw)",
+      resultJson: null,
+    }, new Date("2026-11-27T22:38:00.000Z"));
+
+    expect(classification).toEqual({
+      kind: "provider_quota",
+      retryAt: new Date("2026-11-28T02:00:00.000Z"),
+      parsedResetTime: true,
+    });
+  });
+
   it.each([
     "model_not_found: requested model does not exist",
     "No API credentials were found for this provider",

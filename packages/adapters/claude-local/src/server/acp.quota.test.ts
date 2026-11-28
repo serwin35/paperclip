@@ -126,6 +126,21 @@ it("extracts Claude's dated weekly reset from a real ACP failure", async () => {
   });
 });
 
+it.each([
+  // 23:38 and 02:51 Warsaw time both wait for 03:00 Warsaw (02:00 UTC) the same night.
+  ["2026-11-27T22:38:00.000Z"],
+  ["2026-11-28T01:51:04.000Z"],
+])("waits for Claude's clock-only 5-hour limit reset from a real ACP failure at %s", async (failedAt) => {
+  const title = "You've hit your 5-hour limit · resets 3am (Europe/Warsaw)";
+  const { result } = await executeFailure(title, "limit", "oneshot", undefined, {}, undefined, new Date(failedAt));
+  expect(result).toMatchObject({
+    errorCode: "provider_quota",
+    errorFamily: "provider_quota",
+    retryNotBefore: "2026-11-28T02:00:00.000Z",
+    resultJson: { providerQuotaRetryNotBefore: "2026-11-28T02:00:00.000Z" },
+  });
+});
+
 it("classifies quota without a reset time for the existing recovery backoff", async () => {
   const { result } = await executeFailure("You've hit your weekly limit");
   expect(result).toMatchObject({ errorCode: "provider_quota", errorFamily: "provider_quota" });

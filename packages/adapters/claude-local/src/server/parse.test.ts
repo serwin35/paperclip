@@ -211,6 +211,16 @@ describe("isClaudeTransientUpstreamError", () => {
     );
   });
 
+  it("classifies the hyphenated 5-hour limit wording as provider quota and extracts the retry time", () => {
+    const errorMessage = "Claude run failed: subtype=success: You've hit your 5-hour limit · resets 3am (Europe/Warsaw)";
+
+    expect(isClaudeProviderQuotaError({ errorMessage })).toBe(true);
+    expect(isClaudeTransientUpstreamError({ errorMessage })).toBe(false);
+    expect(extractClaudeRetryNotBefore({ errorMessage }, new Date("2026-11-27T22:38:00.000Z"))?.toISOString()).toBe(
+      "2026-11-28T02:00:00.000Z",
+    );
+  });
+
   it("classifies Anthropic API rate_limit_error and overloaded_error as transient", () => {
     expect(
       isClaudeTransientUpstreamError({

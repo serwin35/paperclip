@@ -64,6 +64,7 @@ describe("provider failure boundary", () => {
     expect(terminal("You've hit your session limit · resets 2am (UTC)")).toMatchObject({ status: "failed", error: { providerFailure: {
       provider: "anthropic", phase: "turn", category: "quota_exhausted", retryability: "requires_action",
       message: `${generic}\nYou've hit your session limit · resets 2am (UTC)` } } });
+    expect(terminal("You've hit your 5-hour limit · resets 3am (Europe/Warsaw)")).toMatchObject({ error: { providerFailure: { category: "quota_exhausted" } } });
     expect(terminal("The Claude account has no available quota.")).toMatchObject({ error: { providerFailure: { category: "quota_exhausted" } } });
     expect(terminal("Claude is temporarily rate limited.")).toMatchObject({ error: { providerFailure: { category: "rate_limit" } } });
     // Context, turn and configured budget limits are not an account allowance.
